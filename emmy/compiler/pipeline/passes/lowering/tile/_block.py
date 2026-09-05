@@ -17,14 +17,13 @@ What each level runs is the only thing that differs between carriers:
   recognized — everything the rewrite needs is read out of the stored combine (``β``, the factor
   the merge puts on the incoming side), and the value it multiplies is the fold's own lift result.
 
-The block WIDTH is a SCHEDULE decision, not a constant. :func:`block_tree` mints one symbolic
-width per blocked axis — a ``Var`` in the outer axis's ceil extent, in the inner axis's extent, and
-in the σ that reconstructs the absolute coordinate — and :func:`bind_widths` substitutes the one
-the scheduler picked. :func:`block_widths` is the domain it picks from, and it is read off the
-blocked tree itself: a bilinear inner level admits exactly the mma K-steps its atoms run, a planar
-one the block ladder whose trip count a cross-CTA split can carry. So the ``k<bk>`` half of a
-``TILE`` value and the ``g<n>`` half of a ``REDUCE`` value are the same decision this width is,
-spelled at the site that owns it.
+Blocking does not change what the kernel computes, so it changes no kernel identity: it happens
+INSIDE the schedule walk (``040_schedule.block_problems``), once per candidate width, and the
+kernel the pipeline identifies and prices stays the unblocked one. Nor does it need a codec family
+of its own — a blocked contraction's inner axis IS its K, so the width is exactly the ``k<bk>`` half
+of that site's ``TILE`` and ``_blocked_kstep`` holds the two to each other. A plain reduction is not
+blocked at all: ``REDUCE`` already spells its partition, and a cross-CTA split already factors the
+axis.
 """
 
 from __future__ import annotations
@@ -32,31 +31,12 @@ from __future__ import annotations
 from dataclasses import replace
 
 from emmy.compiler.dim import Dim, simplify_extent
-from emmy.compiler.ir.atom import ATOM_REGISTRY, atoms_for
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.schedule.catalog import BLOCK_STEPS, SPLITK_WIDTHS
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body
-from emmy.compiler.ir.tile.ops import edge_dtypes
 from emmy.compiler.pipeline.passes.lowering.tile._split import _sliced_edge
-
-#: Namespace of a block width. One per blocked axis, named after it, so a kernel that blocks two
-#: streams carries two independent widths and the scheduler binds each at its own site. The name
-#: never reaches Kernel IR: every width is substituted by :func:`bind_widths` before the pass
-#: returns, because a schedule-time symbol has no launch-time value to resolve against.
-WIDTH_PREFIX = "__blk_"
-
-
-def width_var(axis_name: str) -> str:
-    """The block width variable of one blocked axis."""
-    return f"{WIDTH_PREFIX}{axis_name}"
-
-
-def width_vars(axes) -> tuple[str, ...]:
-    """Every block width an axis table still reads — empty once :func:`bind_widths` has run."""
-    return tuple(dict.fromkeys(name for axis in axes for name in axis.extent.expr.free_vars() if name.startswith(WIDTH_PREFIX)))
 
 
 def is_blocked(axes) -> bool:
@@ -67,16 +47,16 @@ def is_blocked(axes) -> bool:
 # ---- the split ------------------------------------------------------------------------------- #
 
 
-def _split_axis(axis: Axis) -> tuple[Axis, Expr]:
-    """``(the outer trip axis, the symbolic block width)`` for one blocked reduce axis.
+def _split_axis(axis: Axis, width: int) -> tuple[Axis, Expr]:
+    """``(the outer trip axis, the block width)`` for one reduce axis blocked at ``width``.
 
-    The outer count is ``ceil(extent / blk)``, composite in both unknowns, so one tree serves a
+    The outer count is ``ceil(extent / width)``, composite in both unknowns, so one tree serves a
     static extent and a symbolic one.
     """
-    blk = Var(width_var(axis.name))
+    blk = Literal(width, "int")
     extent = axis.extent.expr
-    trips = BinaryExpr("/", BinaryExpr("+", extent, BinaryExpr("-", blk, Literal(1, "int"))), blk)
-    outer = Axis(f"{axis.name}_o", Dim(trips), window=Window(parent=axis.source_axis or axis, block=True))
+    trips = Dim(simplify_extent(BinaryExpr("/", BinaryExpr("+", extent, BinaryExpr("-", blk, Literal(1, "int"))), blk)))
+    outer = Axis(f"{axis.name}_o", trips, window=Window(parent=axis.source_axis or axis, block=True, trip=True))
     return outer, blk
 
 
@@ -124,17 +104,25 @@ def _over_blocks(fold: Fold, outer: Axis, inner_folds: tuple[Fold, ...]) -> Fold
 # ---- the planar carrier: a reduction, and a contraction, which is one with a bilinear lift ---- #
 
 
-def block_planar(fold: Fold, axis: Axis) -> tuple[Fold, tuple[Axis, ...]] | None:
-    """``fold`` re-derived over blocks under the SAME monoid, or ``None`` when it has none.
+def block_planar(fold: Fold, axis: Axis, width: int) -> tuple[Fold, tuple[Axis, ...]] | None:
+    """A CONTRACTION re-derived over blocks under the same monoid, or ``None``.
 
-    The inner level keeps the fold's own lift and its own ⊕, so a contraction's site stays
-    bilinear and takes a tensor-core tile over a K of exactly one block; the outer level folds
-    the per-block states through that same ⊕.
+    The inner level keeps the fold's own lift and its own ⊕, so the site stays bilinear and takes a
+    tensor-core tile over a K of exactly one block; the outer level folds the per-block states
+    through that same ⊕. The block IS the fragment depth, so the row's ``TILE`` spells the width
+    and nothing else has to.
+
+    A PLAIN reduction is deliberately left alone. Its reduce axis is already partitioned by
+    ``REDUCE`` — ``g<n>`` across CTAs, ``coop``/``r<n>`` within one — and a cross-CTA split already
+    factors the axis structurally, so blocking it would restate a decision that family makes and
+    give the width no spelling of its own.
     """
     view = fold.as_reduction()
     if view is None or view.ops is None:
         return None  # twisted: :func:`block_twisted` owns it
-    outer, blk = _split_axis(axis)
+    if fold.as_contraction() is None:
+        return None  # a plain reduction: REDUCE already spells its partition
+    outer, blk = _split_axis(axis, width)
     inner, sigma = _block_binder(axis, outer, blk, "i")
     states = tuple(f"{state}__blk" for state in view.states)
     body = Body(tuple(stmt.substitute(sigma) for stmt in fold.lift.body))
@@ -249,7 +237,7 @@ def _channel(fold: Fold, index: int, weight: Fold, beta: str, operands: tuple, i
     )
 
 
-def block_twisted(fold: Fold, axis: Axis) -> tuple[Fold, tuple[Axis, ...]] | None:
+def block_twisted(fold: Fold, axis: Axis, width: int) -> tuple[Fold, tuple[Axis, ...]] | None:
     """The twisted ``fold`` re-derived over blocks, or ``None`` when it is not blockable.
 
     Returns the blocked fold and the axes the kernel must now hold: the outer trip count, and one
@@ -261,7 +249,7 @@ def block_twisted(fold: Fold, axis: Axis) -> tuple[Fold, tuple[Axis, ...]] | Non
         return None
     pivot_op, _, betas = read
     view = fold.as_reduction()
-    outer, blk = _split_axis(axis)
+    outer, blk = _split_axis(axis, width)
     binders = [_block_binder(axis, outer, blk, tag) for tag in ("p", *(f"c{i}" for i in range(1, len(view.states))))]
 
     lift, states = fold.lift, view.states
@@ -304,11 +292,11 @@ def block_twisted(fold: Fold, axis: Axis) -> tuple[Fold, tuple[Axis, ...]] | Non
     return _over_blocks(fold, outer, inner_folds), (outer, *(binder for binder, _ in binders))
 
 
-# ---- the tree walk, the width domain, and the binding ----------------------------------------- #
+# ---- the tree walk ---------------------------------------------------------------------------- #
 
 
 def _blockable(fold: Fold, axis: Axis | None) -> bool:
-    """Whether one fold's axis still carries a block decision.
+    """Whether one fold's reduce axis can still be blocked.
 
     A scan is excluded — blocking changes which prefixes its observer sees. So is an axis a
     structural rewrite has already consumed: a cross-CTA partition, and a block itself.
@@ -321,43 +309,51 @@ def _blockable(fold: Fold, axis: Axis | None) -> bool:
     return axis.extent.is_static and axis.extent.as_static() > 1
 
 
-def block(fold: Fold, axis: Axis) -> tuple[Fold, tuple[Axis, ...]] | None:
-    """``fold`` blocked at a SYMBOLIC width, whichever carrier it is — or ``None``."""
-    return block_planar(fold, axis) or block_twisted(fold, axis)
+def block(fold: Fold, axis: Axis, width: int) -> tuple[Fold, tuple[Axis, ...]] | None:
+    """``fold`` blocked at ``width``, whichever carrier it is — or ``None``."""
+    return block_planar(fold, axis, width) or block_twisted(fold, axis, width)
 
 
-def block_tree(
-    root: Fold,
-    axes: tuple,
-    only: frozenset[int] | None = None,
-) -> tuple[Fold, tuple[Axis, ...], tuple[tuple[Fold, str, Fold], ...]] | None:
-    """Every root-most blockable stream of the tree, blocked at its own symbolic width.
+def blockable_streams(root: Fold, axes: tuple) -> tuple[tuple[Fold, Axis], ...]:
+    """Every root-most reduce stream this tree can block, with the axis each one folds."""
+    table = {axis.name: axis for axis in axes}
+    found: list[tuple[Fold, Axis]] = []
+    seen: set[int] = set()
 
-    ``None`` when nothing blocks, so the pass declines rather than rebuilding an equal tree. The
-    third element carries one ``(pre-block fold, width variable, blocked outer fold)`` per decided
-    stream: the first names the site the offer is deciding, the second is what
-    :func:`bind_widths` substitutes, and the third is the tree :func:`block_widths` reads its
-    domain off.
+    def descend(term: Fold) -> None:
+        if id(term) in seen:
+            return
+        seen.add(id(term))
+        axis = table.get(term.axis) if term.axis is not None else None
+        if _blockable(term, axis) and block(term, axis, axis.extent.as_static()) is not None:
+            found.append((term, axis))
+            return
+        for edge in term.operands:
+            descend(edge)
 
-    ``only`` restricts the walk to the streams whose pre-block fold ids it holds — how one arm of
-    the offer blocks the subset it decided a width for and leaves the rest as they were. ``None``
-    blocks every blockable stream, which is what the offer enumerates over.
+    descend(root)
+    return tuple(found)
+
+
+def block_tree(root: Fold, axes: tuple, widths: dict[int, int]) -> tuple[Fold, tuple[Axis, ...]]:
+    """The tree with each stream in ``widths`` blocked at its width, and the axes that follow.
+
+    ``widths`` is keyed by the ``id`` of the pre-block fold, which is what
+    :func:`blockable_streams` hands back — a route would have to be re-resolved against a tree that
+    is changing underneath it.
     """
     table = {axis.name: axis for axis in axes}
     installed: list[Axis] = []
-    streams: list[tuple[Fold, str, Fold]] = []
     done: dict[int, Fold] = {}
 
     def descend(term: Fold) -> Fold:
         if id(term) in done:
             return done[id(term)]
         axis = table.get(term.axis) if term.axis is not None else None
-        chosen = only is None or id(term) in only
-        got = block(term, axis) if chosen and _blockable(term, axis) else None
+        got = block(term, axis, widths[id(term)]) if id(term) in widths and axis is not None else None
         if got is not None:
             out, fresh = got
             installed.extend(fresh)
-            streams.append((term, width_var(axis.name), out))
         else:
             edges = tuple(descend(edge) for edge in term.operands)
             out = replace(term, operands=edges) if any(a is not b for a, b in zip(edges, term.operands, strict=True)) else term
@@ -365,70 +361,5 @@ def block_tree(
         return out
 
     blocked = descend(root)
-    if not installed:
-        return None
     fresh = {axis.name for axis in installed}
-    return blocked, (*(axis for axis in axes if axis.name not in fresh), *installed), tuple(streams)
-
-
-def _atom_k_steps(tile, node: Fold, target) -> tuple[int, ...]:
-    """The K-steps the tensor-core atoms of one bilinear inner level run, coarse enough to stage.
-
-    A blocked contraction's inner axis IS its K, so a width is legal exactly when the atom's
-    fragment depth divides it — which makes the block width the ``k<bk>`` half of a ``TILE``
-    value, decided once, at the site that owns the stream.
-    """
-    dtypes = {dtype for edge in node.operands for dtype in edge_dtypes(edge, tile.inputs) if dtype is not None}
-    steps = {ATOM_REGISTRY[name].atom_k * depth for dtype in dtypes for name in atoms_for(dtype, ctx=target) for depth in BLOCK_STEPS}
-    return tuple(sorted(steps))
-
-
-def block_widths(tile, blocked: Fold, axis: Axis, target) -> tuple[int, ...]:
-    """The widths one blocked stream admits, coarse→fine as the offer orders them.
-
-    Read off the BLOCKED tree, never off a recipe: an inner level that reads as a contraction
-    admits the mma K-steps its atoms run, so the block IS the fragment depth; any other admits the
-    ladder whose trip counts a cross-CTA split can carry. Only divisors are offered — the ceil
-    form is built and correct, but a masked tail is a realization the emitter does not have.
-    """
-    extent = axis.extent.as_static()
-    inner = next((edge for edge in blocked.operands if edge.axis is not None), None)
-    bilinear = inner is not None and inner.as_contraction() is not None
-    ladder = _atom_k_steps(tile, inner, target) if bilinear else tuple(extent // width for width in SPLITK_WIDTHS)
-    return tuple(sorted({width for width in ladder if 1 < width < extent and extent % width == 0}, reverse=True))
-
-
-def _drop_coordinates(term: Fold, names: frozenset[str]) -> Fold:
-    """The term with the bound widths gone from every lambda's coordinate params.
-
-    Substituting a coordinate by a value stops it BEING a coordinate. A σ image spells the
-    absolute index as ``k_o·blk + k_i``, so ``Lambda.closing`` bound the width alongside the two
-    real coordinates when it closed the edge; left there, ``Fold.lower`` would ask the kernel's
-    axis table for an extent no axis has. Only trailing coordinate params can carry a width — the
-    operand-bound prefix is positional and never holds one — so dropping by name preserves the
-    binding law.
-    """
-    operands = tuple(_drop_coordinates(edge, names) for edge in term.operands)
-    lift = replace(term.lift, params=tuple(param for param in term.lift.params if param not in names))
-    observe = term.observe
-    if observe is not None:
-        observe = replace(observe, params=tuple(param for param in observe.params if param not in names))
-    return replace(term, operands=operands, lift=lift, observe=observe)
-
-
-def bind_widths(op: Fold, axes: tuple, widths: dict[str, int]) -> tuple[Fold, tuple[Axis, ...]]:
-    """Substitute the widths the scheduler picked — the one place a block width stops being a symbol.
-
-    Three halves move together: the σ that reconstructs the absolute coordinate lives in the term's
-    operand indices, the coordinate params that σ image closed over live on its lambdas, and the two
-    extents live in the kernel's axis table.
-    """
-    from emmy.compiler.ir.stmt.passes import rewrite  # noqa: PLC0415
-
-    values = {name: Literal(width, "int") for name, width in widths.items()}
-    bound = _drop_coordinates(rewrite(op, lambda name: name, Sigma(values)), frozenset(values))
-    table = tuple(replace(axis, extent=Dim(simplify_extent(axis.extent.expr.substitute(values)))) for axis in axes)
-    # Total, and loudly so: a width left unbound reads back as a NON-static extent, which withholds
-    # split-K, the coop bands and raster from the stream without erroring anywhere.
-    assert not width_vars(table), f"block widths still unbound after substitution: {width_vars(table)}"
-    return bound, table
+    return blocked, (*(axis for axis in axes if axis.name not in fresh), *installed)

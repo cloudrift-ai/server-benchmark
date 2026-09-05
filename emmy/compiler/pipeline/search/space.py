@@ -41,19 +41,6 @@ PLACE = Knob(
     help="Stored Fold-edge placement (fuse into the consumer or cut to a fresh workspace kernel).",
 )
 
-# The block width of one reduce stream — the structural decision ``025_block`` consumes, decided
-# per site like ``PLACE`` and spelled on the same tree-path routes. ``off=""`` = unblocked (the
-# stream stays one loop); ``b<n>`` blocks it into ``ceil(extent/n)`` trips of ``n``. A blocked
-# contraction's inner K IS the block, so this value subsumes the ``k<bk>`` half of that site's
-# ``TILE``; a blocked reduction's trip count is what a cross-CTA split partitions.
-BLOCK = Knob(
-    "BLOCK",
-    KnobType.STR,
-    help="Reduce-stream block width, site-local (b<n>; empty=unblocked). "
-    "Decided in lowering/tile/025_block, before any classic schedule exists.",
-    off="",
-)
-
 # The reduce-axis partition codec. ``off=""`` = the scalar serial fold.
 REDUCE = Knob(
     "REDUCE",

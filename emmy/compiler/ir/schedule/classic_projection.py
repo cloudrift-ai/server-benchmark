@@ -30,6 +30,7 @@ from emmy.compiler.ir.schedule import (
     derive_inventory,
 )
 from emmy.compiler.ir.schedule.catalog import (
+    BLOCK_STEPS,
     WARP_LANES,
     coop_reduce_moves,
     producer_band_moves,
@@ -249,6 +250,29 @@ def _warp_atoms(tile: TileOp, target, node) -> tuple[str, ...]:
     if _node_refusal(tile, target, node, _fragment_epilogue_ok(tail, _fold_states(tile.op)), packed) is not None:
         return ()
     return _atom_families(tile, target, node, tail, packed)
+
+
+def block_widths(tile: TileOp, target, node, axis) -> tuple[int, ...]:
+    """The widths a TWISTED carrier admits as blocks, coarse→fine — the mma K-steps its atoms run.
+
+    Only a twisted carrier is offered anything. A contraction's block is already spelled: ``bk``
+    says how many atom K-steps one inner step consumes, and the materializer chunks K by it, so
+    re-associating the term into ``k_o × k_i`` would restate that field as a shape and buy nothing.
+    A twisted carrier is different in kind — its ⊕ is a rescaling program, so ``as_contraction``
+    refuses at its first gate and NO site inside it is bilinear. Blocking separates the two monoids
+    and CREATES the site, which is why the width is offered here and nowhere else.
+
+    The block is still the fragment depth, so the row's ``TILE`` at the created site spells it and
+    no codec family is added. Only divisors are offered — the ceil form is built and correct, but a
+    masked tail is a realization the emitter does not have.
+    """
+    view = node.as_reduction()
+    if view is None or view.ops is not None or not axis.extent.is_static:
+        return ()  # only a TWISTED carrier gains anything: see the docstring
+    extent = axis.extent.as_static()
+    dtypes = {dtype for edge in node.operands for dtype in edge_dtypes(edge, tile.inputs) if dtype is not None}
+    ladder = {ATOM_REGISTRY[name].atom_k * depth for dtype in dtypes for name in atoms_for(dtype, ctx=target) for depth in BLOCK_STEPS}
+    return tuple(sorted({width for width in ladder if 1 < width < extent and extent % width == 0}, reverse=True))
 
 
 def _blocked_kstep(k_axis) -> int | None:

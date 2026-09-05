@@ -74,28 +74,27 @@ post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one stored tree
 
-`020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. `025_block` then
-offers the BLOCK WIDTH of every blockable reduce stream. Blocking splits one reduce axis into `k_o × k_i` and
-re-associates the fold over the two levels; what each level runs is the only thing that differs between carriers. A
-PLANAR fold — a plain reduction, and a contraction, which is a reduction whose lift is a product — runs the same
-monoid at both levels, so a blocked contraction's inner site stays bilinear over a K of exactly one block and its
-outer level is a plain reduce a cross-CTA split partitions. A TWISTED carrier's ⊕ is a rescaling program, so no site
-inside one can be bilinear at all; blocking separates the two monoids, leaving the twisted ⊕ on the outer fold and
-running the base monoid over a per-block contribution, and the channel whose contribution is a product of two
-distinct cones then reads as a contraction. That is FlashAttention-2's shape, derived rather than recognized: the
-per-step rescale coefficient is read out of the stored combine and the value it multiplies is the fold's own lift
-result, so no recipe is consulted and no operation family is matched.
+`020_twisted` first applies the general exp-family Fold rewrite described at the boundary below.
 
-The width is a SCHEDULE decision, not a constant. The tree is blocked once symbolically — one `Var` per blocked axis,
-in the outer axis's ceil trip count, the inner axis's extent, and the σ that reconstructs the absolute coordinate —
-the domain is read off that tree, and each arm substitutes one width. A bilinear inner level admits exactly the mma
-K-steps its atoms run and a planar one the trip counts a cross-CTA split can carry, so the `k<bk>` half of a `TILE`
-value and the `g<n>` half of a `REDUCE` value are the same quantity this width is: once the block is decided,
-`_blocked_kstep` narrows that site's `TILE` domain to agree with it instead of re-offering it. The declined value
-leads for a planar stream (its schedule space is already complete unblocked) and trails for a twisted one (declining
-there is a different algorithm, not a schedule alternative). Two receipts stop a second decision, because either can
-arrive alone: the decided kernel carries its `BLOCK` value in `knobs`, and every axis a block installs carries
-`Window(block=True)`.
+BLOCKING is not a pass and not a decision of its own. `040_schedule` enumerates over one problem
+per block form of the kernel: a reduce axis split into `k_o × k_i` and the fold re-associated over
+the two levels. That does not change what the kernel computes, so the kernel the pipeline stamps,
+identifies, pools and prices is the unblocked one, and each form is another shape of the same
+problem — like a tile size, not like a cut.
+
+Only a TWISTED carrier is offered a block, because it is the only carrier a block gives anything.
+A contraction's block is already spelled: `bk` says how many atom K-steps one inner step consumes
+and the materializer chunks K by it, so re-associating the term would restate that field as a
+shape. A plain reduction's partition is `REDUCE`'s, and the cross-CTA split already factors its
+axis. A twisted carrier is different in kind — its ⊕ is a rescaling program, so `as_contraction`
+refuses at its first gate and NO site inside it is bilinear. Blocking separates the two monoids
+(the twisted ⊕ stays on the outer fold, the inner level runs the base monoid over a per-block
+contribution) and CREATES a site whose contribution is a product of two distinct cones, which reads
+as a contraction. That is FlashAttention-2's shape, derived rather than recognized: the per-step
+rescale coefficient is read out of the stored combine and the value it multiplies is the fold's own
+lift result, so no recipe is consulted and no operation family is matched. The width rides the
+`TILE` at the created site — it IS that tile's mma K-step, which `_blocked_kstep` holds it to — so
+blocking adds no codec family and no key to any row.
 
 The single `030_cut`
 pass runs to a fixpoint over two ordered domains. It first offers the maximal fused tree beside every semantically

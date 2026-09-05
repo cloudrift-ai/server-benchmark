@@ -668,7 +668,7 @@ offers, or a schedule row no kernel of the replay enumerates, is stale and is no
 realizes is the question the nightly `onboard-model` workflow asks with the strict decode (`golden.decode_record`),
 over the same replay: the persisted program must select exactly one kernel (a receipt selects its child by stored
 identity), a routing record's every cut key must name a seam the cut pass offers, and a schedule row must equal one
-enumerated leaf under the record's own pins. The per-commit tests do not load checked-in goldens because proving a
+enumerated leaf under the record's own pins. The default test suite does not load checked-in goldens because proving a
 row enumerates its whole fork costs record count times fork size.
 
 **Whether goldens are training data differs between the two halves of the prior.** The **online** prior never trains

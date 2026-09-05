@@ -188,7 +188,9 @@ def test_bare_reduce_forks_the_coop_catalog():
         if any(_is_structural_option(leaf) for leaf in leaves):
             return next(leaf for leaf in leaves if not _is_structural_option(leaf))
         for leaf in leaves:
-            rows.append(dict(getattr(leaf, "knobs", {}) or {}))
+            row = dict(getattr(leaf, "knobs", {}) or {})
+            if family_value(row, "REDUCE") is not None:  # the pass forks other families too
+                rows.append(row)
         return leaves[0]
 
     Run(pipeline=Pipeline.build(TILE_PASSES), ctx=Context.from_target((12, 0))).resolve(_reduce_graph(), decide)

@@ -34,6 +34,7 @@ tests/compiler/passes/
 ├── test_launch_geometry_rules.py   # launch-geometry pass
 ├── test_move_catalog.py           # schedule catalogs, site trees, and independent-root compatibility
 ├── test_cut_forks.py              # fused/cut Fold-edge offers and pinned CUDA lowering
+├── test_block_forks.py            # the blocked twisted carrier: its canonical form and the width a row binds
 ├── test_placement_routing.py       # frontend placement pins, routing rows, and MIMO preservation
 ├── test_split_fresh_kernels.py    # generic cross-CTA Fold splitting and fresh-piece invariants
 ├── test_masked_tile.py             # masked-tile pass (dynamic-shape boundary guard)

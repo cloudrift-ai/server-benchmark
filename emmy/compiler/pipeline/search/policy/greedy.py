@@ -636,6 +636,21 @@ def _require_evidence(fp: ForkPoint, why: str) -> None:
     )
 
 
+def _strip_fork_stamps(sig: frozenset) -> frozenset:
+    """``sig`` less the stamps a schedule fork mints on its own rows (:data:`SCHEDULE_FORK_STAMPS`)."""
+    from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS  # noqa: PLC0415
+
+    return frozenset((key, value) for key, value in sig if key not in SCHEDULE_FORK_STAMPS)
+
+
+def _strip_fork_stamps_index(source: dict[frozenset, list]) -> dict[frozenset, list]:
+    """``source`` re-keyed by :func:`_strip_fork_stamps`, rows of a collided key joined."""
+    out: dict[frozenset, list] = {}
+    for sig, group in source.items():
+        out.setdefault(_strip_fork_stamps(sig), []).extend(group)
+    return out
+
+
 def _route_candidates(fp: ForkPoint, index: _Measured) -> list[tuple[object, float]]:
     """The measured arms at this kernel-set fork: one ``(option, µs)`` per measured row of
     the kernel's signature that spells an arm on the ballot
@@ -652,8 +667,13 @@ def _route_candidates(fp: ForkPoint, index: _Measured) -> list[tuple[object, flo
         return []
     if _structural_domain(fp.options) not in (("PLACE",), ("REDUCE",)):
         return []
-    sig = _fork_signature(fp)
-    measured = [entry for source in (index.ok, index.routes) for group in _sig_groups(source, sig) for entry in group]
+    # The join drops the SCHEDULE fork's own stamps from both sides: they say what the schedule
+    # space offers, which this fork is decided before anyone knows, so a recorded row carrying one
+    # would never be a subset of a candidate that structurally cannot.
+    sig = _strip_fork_stamps(_fork_signature(fp))
+    measured = [
+        entry for source in (index.ok, index.routes) for group in _sig_groups(_strip_fork_stamps_index(source), sig) for entry in group
+    ]
     out: list[tuple[object, float]] = []
     for row, us in measured:
         arm = spelled_arm(fp.options, row)

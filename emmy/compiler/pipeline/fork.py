@@ -250,6 +250,13 @@ def flatten_leaves(options: Sequence[Op | Graph | Fork]) -> list[Op | Graph | Fo
     return list(iter_leaves(options))
 
 
+#: The ``S_*`` stamps the SCHEDULE fork mints on its own rows — properties of the offered schedule
+#: SPACE, not of the kernel. A kernel-set fork is decided before any schedule exists, so its
+#: candidates cannot carry them however warp-eligible the kernel turns out to be; a recorded row's
+#: copy therefore must not join against them (``policy/greedy._route_candidates``).
+SCHEDULE_FORK_STAMPS = frozenset({"S_warp_eligible"})
+
+
 def fork_signature(root_op: Op, options: Sequence[Op | Graph | Fork], ctx) -> frozenset:
     """The ``S_*`` signature every candidate at one fork shares — the key a measured row of this
     kernel is filed under. The offer op's structural stamp under the run's context features, plus

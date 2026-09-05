@@ -25,14 +25,14 @@ configs:
     origins:
     - scaled_dot_product_attention
   realizations:
-  - name: k_sdpa_5c434c.c536b10b1afd
+  - name: k_sdpa_fbd178.50222a02272c
     bindings: {}
     pins:
       FAST_MATH: false
       PLACE: fuse
     knobs:
       REDUCE: g2k
-    identity: 5d54a3c4cac6bae0eb4a7f35c1e23159d0db38abfbda0a491c97b9573efa0861
+    identity: 67cbcab0df00f82f63dd2926d4b01cd40345f8801d05ba2ad82c9c8ab642f2ca
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 22.498559951782227
@@ -58,3 +58,45 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 8b77fda293c729aeb5c1178682a6b101e2a1f9c5bdfa401f3996d67a8b8b3a39
+  - name: k_sdpa_b10719.407a8b374936.8f4a50ebac20
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 8f4a50ebac2018ffd2f33c1e413651294751769a9adbe8c1ecd3828b5503a889
+  - name: k_sdpa_b10719.407a8b374936.9a5f9a3a93a2
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@twist: ''
+      REDUCE@twist.1/inner: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 9a5f9a3a93a28ec7bef70c3fb9da77d022f14b6d8b1178e387f4b6832983e190
+  - name: k_sdpa_fbd178.50222a02272c.1c4cbc6d14fc
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 1c4cbc6d14fcd989671d2fb95918afbe758319f0487768b7042bcc50cf1c67c7
+  - name: k_sdpa_fbd178.50222a02272c.5a2933635c03
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@twist: ''
+      REDUCE@twist.1/inner: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 5a2933635c03c8d6da2ab5aefb24503b720d499a9fa5ff19cef36ddc49e8659d

@@ -364,7 +364,7 @@ emmy vm delete cloudrift --instance-id <id>
 ## Development
 
 ```bash
-make test      # run pytest
+make test      # run the whole pytest suite — takes many minutes, run it once when finishing a PR
 make lint      # ruff check + format check
 make format    # auto-fix
 make wheel     # build the wheel into dist/
@@ -469,8 +469,9 @@ require CloudRift organization access.
 1. Fork and branch from `main` (e.g. `feature/my-change`)
 2. Follow [STYLE.md](STYLE.md) and per-directory `ARCHITECTURE.md` files
 3. Add tests in `tests/` (see [tests/ARCHITECTURE.md](tests/ARCHITECTURE.md))
-4. `make test && make lint` (use `make format` to auto-fix)
-5. Open a PR against trunk
+4. While developing, run only the tests that cover your change, and open a **draft** PR early
+5. Finish the PR once, at the end: audit the diff, update the docs, then `make test && make lint` (use `make format`
+   to auto-fix), fill in `.github/PULL_REQUEST_TEMPLATE.md`, and mark the PR ready for review
 
 ## License
 

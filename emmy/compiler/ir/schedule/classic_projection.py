@@ -14,11 +14,10 @@ another enumerator.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 from emmy.compiler.ir.address import gmem_axis_step, split_addressable
 from emmy.compiler.ir.atom import ATOM_REGISTRY, AtomKind, atoms_for
-from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.schedule import (
     PlacedTile,
@@ -58,7 +57,6 @@ from emmy.compiler.ir.schedule.views import ContractionFacts
 from emmy.compiler.ir.stmt import Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import has_contraction_tail
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.block import bind_widths
 from emmy.compiler.ir.tile.ops import Sched, chain_form, chain_members, edge_dtypes, kernel_roots, projection_tail, scheduled
 
 
@@ -92,19 +90,16 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     streamed serial-only exclusions and the same transposed exclusion, with no carve-out of its own.
     """
     axis = tile.axis_of(node.axis) if node.axis is not None else None
-    if axis is not None and axis.step is not None:
-        # A STRIDED axis walks its extent in blocks, so its trip count is not its extent. Every
-        # partition here sizes itself against the extent — the coop band's lane slice, the serial
-        # remainder, the cross-CTA width — and would hand each unit the wrong share. Teaching them
-        # to read ``step`` is the open work; until then a blocked stream folds serially.
-        return (Reduce(),)
     roots = kernel_roots(tile.op)
     is_root = any(node is root for root in roots)
     if node.observe is not None or not (is_root or any(node is member for root in roots for member in chain_members(root))):
         return (Reduce(),)  # the binder partitions the roots it peels and their chain members; any other reduce lowers serially
     if {axis.name for spec in tile.output_specs for axis in spec.sweep} & node.free_axes:
         return (Reduce(),)
-    transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node)
+    # ``coop-t`` sweeps the OUTPUT axis so B loads coalesce at every k step, which a STRIDED
+    # reduce axis has no reading of: its k steps are blocks, and one lane per output column would
+    # sweep a block rather than an element. The other bands ride :attr:`Axis.trips` and do.
+    transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node) and (axis is None or axis.step is None)
     return (
         Reduce(),
         *(choice for choice in coop_reduce_moves() if not choice.coop_transposed or (choice.coop % WARP_LANES == 0 and transposed_ok)),
@@ -409,35 +404,6 @@ def project_classic(tile: TileOp, target) -> ClassicDomains:
     )
 
 
-def _block_widths(tile: TileOp, assignment: ClassicAssignment) -> dict[str, int]:
-    """The width each blocked stream is bound to by the row that schedules it.
-
-    A blocked site's inner axis IS its K, so the width is exactly the mma K-step of the ``TILE``
-    the row put there — the two are one quantity, which is why blocking spells nothing of its own.
-    A stream whose sites all took the scalar tier has no K-step to read, and falls back to the
-    whole extent: one trip, which is the unblocked kernel.
-    """
-    widths: dict[str, int] = {}
-    for axis in tile.axes:
-        variable = axis.step.name if axis.step is not None and isinstance(axis.step, Var) else None
-        if variable is None:
-            continue
-        steps = {
-            choice.tile.atom.atom_k * choice.tile.bk
-            for site, choice in assignment.nodes.items()
-            if choice.tile.is_warp and _stream_of(tile, site) == variable
-        }
-        widths[variable] = min(steps) if len(steps) == 1 else axis.extent.as_static()
-    return widths
-
-
-def _stream_of(tile: TileOp, site) -> str | None:
-    """The block width variable of the stream one site's axis belongs to, if any."""
-    name = tile.views[site].axis
-    window = tile.axis_of(name).window if name is not None else None
-    return window.block if window is not None and window.block else None
-
-
 def materialize_classic(
     tile: TileOp,
     *,
@@ -447,10 +413,6 @@ def materialize_classic(
     assignment: ClassicAssignment,
 ) -> TileOp:
     """Materialize one accepted classic assignment into a scheduled TileOp."""
-    # The row binds every block width first: a blocked stream's geometry and its shared-memory
-    # sizing are read against the axes the kernel will actually walk, not against the symbol.
-    widths = _block_widths(tile, assignment)
-    tile = replace(tile, axes=bind_widths(tile.axes, widths)) if widths else tile
     sched = Sched(tile, place=tile.place.on_grid())
     placed = {}
     resolved = {}

@@ -48,14 +48,11 @@ class Window:
     against it, since a mid-tensor slice end reads VALID keys belonging to the next slice, which
     the extent-only tail machinery would not exclude. ``None`` on both = the whole parent.
 
-    ``block`` names the width VARIABLE of the blocked stream this axis belongs to, on both windows
-    blocking produces — the outer trip axis and the inner block axis. It is the same kind of receipt
-    ``partition`` is: nothing may block a stream twice, and the axis's OWN extent (not its parent's)
-    is the geometry a tile over it is sized against. A blocked axis is not a partition — it stays
-    inside one kernel. ``trip`` marks which of the two is the OUTER axis, the one whose extent is
-    ``ceil(parent / width)``; that axis is the site the ``BLOCK`` schedule family addresses. The
-    mark is stored rather than read off the extent because it must survive the substitution that
-    binds the width — after it, both extents are plain literals.
+    ``block`` marks both windows blocking produces — the outer axis that walks the stream a block
+    at a time and the inner axis that walks one block. It is the same kind of receipt ``partition``
+    is: nothing may block a stream twice, and the axis's OWN extent (not its parent's) is the
+    geometry a tile over it is sized against. A blocked axis is not a partition — it stays inside
+    one kernel, and the two are told apart by :attr:`Axis.step`, which only the outer one carries.
 
     ``partition`` marks the one window a CROSS-CTA SPLIT produced: this axis is one CTA's share of
     a reduce stream, not a tile of an iteration space. Every other window — the partition planner's
@@ -69,24 +66,7 @@ class Window:
     base: Expr | None = None
     bound: Expr | None = None
     partition: bool = False
-    block: str | None = None
-    trip: bool = False
-
-
-#: Namespace of a block width. ``025_block`` splits a reduce axis into ``k_o × k_i`` and leaves the
-#: inner extent a SYMBOL in this namespace, one per blocked axis and named after it, so the term
-#: names the split without naming a size. The classic ``BLOCK`` family binds it; nothing else may.
-BLOCK_WIDTH_PREFIX = "__blk_"
-
-
-def block_width_var(axis_name: str) -> str:
-    """The block width variable of one blocked axis."""
-    return f"{BLOCK_WIDTH_PREFIX}{axis_name}"
-
-
-def block_width_vars(axes) -> tuple[str, ...]:
-    """Every block width an axis table reads, in first-seen order."""
-    return tuple(dict.fromkeys(name for axis in axes for name in axis.extent.expr.free_vars() if name.startswith(BLOCK_WIDTH_PREFIX)))
+    block: bool = False
 
 
 @dataclass(frozen=True)
@@ -123,10 +103,16 @@ class Axis:
             object.__setattr__(self, "extent", to_dim(self.extent))
 
     @property
-    def block_width(self) -> str | None:
-        """This axis's block width VARIABLE when it is a blocked stream's outer trip axis, else
-        ``None`` — the one reading that says "the ``BLOCK`` family addresses me"."""
-        return self.window.block if self.window is not None and self.window.trip else None
+    def trips(self) -> int | None:
+        """How many times this axis ITERATES — its extent, or ``ceil(extent / step)`` when it
+        strides (a blocked stream walks its parent one block at a time). ``None`` while either is
+        symbolic. Every partition sizes itself against this number — the coop band's lane share,
+        the ILP remainder, the cross-CTA width — and never against the extent, which for a strided
+        axis counts coordinates rather than steps."""
+        if not self.extent.is_static or (self.step is not None and not isinstance(self.step, Literal)):
+            return None
+        step = self.step.value if self.step is not None else 1
+        return -(-self.extent.as_static() // step)
 
     @property
     def source_axis(self) -> Axis | None:

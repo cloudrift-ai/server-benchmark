@@ -27,12 +27,11 @@ K-step and no schedule family spells it twice.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import replace
 
-from emmy.compiler.dim import Dim, simplify_extent
-from emmy.compiler.ir.axis import Axis, Window, block_width_var
-from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
+from emmy.compiler.dim import Dim
+from emmy.compiler.ir.axis import Axis, Window
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load
@@ -40,7 +39,7 @@ from emmy.compiler.ir.stmt import Assign, Body, Load
 
 def is_blocked(axes) -> bool:
     """Whether this kernel's axis table already carries a blocked stream (the re-firing receipt)."""
-    return any(axis.window is not None and axis.window.block is not None for axis in axes)
+    return any(axis.window is not None and axis.window.block for axis in axes)
 
 
 # ---- the split ------------------------------------------------------------------------------- #
@@ -71,29 +70,55 @@ def sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | Non
     return replace(edge, operands=ops, lift=replace(edge.lift, params=params, body=body))
 
 
-def _split_axis(axis: Axis) -> tuple[Axis, Expr]:
-    """``(the outer block-walking axis, the symbolic block width)`` for one blocked reduce axis.
+#: The widest block a stream is cut into. A block is a WORKING SET: the pivot's pass has to reach
+#: the end of it before the channels may start, so every value the channels then read against that
+#: pivot has to still be in registers — which is what bounds it, and 128 columns is the widest
+#: fragment grid the tensor-core catalog tiles a contraction's output to.
+MAX_BLOCK = 128
 
-    The outer axis walks the SAME extent the stream always had, in strides of the width — so the
-    trip count is ``ceil(extent / blk)`` without anyone computing it, the absolute coordinate is
-    plain ``k_o + k_i``, and the width appears nowhere in the term. It lives on the two axes: as
-    this one's ``step`` and as the binder's extent. That is what makes blocking parameter-free, and
-    therefore a normalization rather than a decision.
+
+def block_width(extent: int) -> int | None:
+    """The block ``extent`` is cut into — the largest power-of-two fraction of it within
+    :data:`MAX_BLOCK` — or ``None`` when it is not cut at all.
+
+    A WHOLE number of blocks, always: the alternative is a masked tail on a stream whose channels
+    each carry their own pass over it, and the tail's identity would have to be threaded through
+    the pivot and every channel separately. An odd extent therefore blocks not at all, and neither
+    does one that would come out a single block — that is the unblocked kernel, reached by leaving
+    the term alone rather than by a second spelling of it.
+
+    The width is the FORM's, not a decision: the row that schedules a blocked site chunks the block
+    with its own ``bk`` exactly as it chunks any other K, so nothing here is a fork and nothing
+    downstream sizes itself against a symbol.
     """
-    blk = Var(block_width_var(axis.name))
-    outer = Axis(f"{axis.name}_o", axis.extent, window=Window(parent=axis.source_axis or axis, block=blk.name, trip=True), step=blk)
-    return outer, blk
+    width = extent
+    while width > MAX_BLOCK or width == extent:
+        if width % 2:
+            return None
+        width //= 2
+    return width
 
 
-def _block_binder(axis: Axis, outer: Axis, blk: Expr, tag: str) -> tuple[Axis, Sigma]:
+def _split_axis(axis: Axis, width: int) -> Axis:
+    """The outer block-walking axis of one blocked reduce axis.
+
+    It walks the SAME extent the stream always had, in strides of ``width`` — so the trip count is
+    ``extent / width`` without anyone computing it, the absolute coordinate is plain ``k_o + k_i``,
+    and no width ever enters the term's index arithmetic. ``Fold.lower`` renders a strided axis as
+    the ``StridedLoop`` that already says exactly this.
+    """
+    parent = axis.source_axis or axis
+    return Axis(f"{axis.name}_o", axis.extent, window=Window(parent=parent, block=True), step=Literal(width, "int"))
+
+
+def _block_binder(axis: Axis, outer: Axis, width: int, tag: str) -> tuple[Axis, Sigma]:
     """One inner fold's OWN binder over the block, and the σ that reads the absolute coordinate.
 
-    Each inner fold is a separate loop over the same block — the pivot's pass, then each channel's —
-    so each needs a coordinate of its own. A term tree names one coordinate per name; sharing the
-    binder makes ``lower`` place them as one loop, and the weight then reads a block pivot that has
-    not finished accumulating.
+    The pivot's pass and the channels' are separate loops over the same block, so each level needs
+    a coordinate of its own: sharing one binder with the pivot makes ``lower`` place them as one
+    loop, and the weight then reads a block pivot that has not finished accumulating.
     """
-    inner = Axis(f"{axis.name}_{tag}", Dim(blk), window=Window(parent=axis.source_axis or axis, block=blk.name))
+    inner = Axis(f"{axis.name}_{tag}", Dim(width), window=Window(parent=axis.source_axis or axis, block=True))
     sigma = Sigma({axis.name: BinaryExpr("+", Var(outer.name), Var(inner.name))})
     return inner, sigma
 
@@ -249,10 +274,13 @@ def block_twisted(fold: Fold, axis: Axis) -> tuple[Fold, tuple[Axis, ...]] | Non
     if read is None:
         return None
     pivot_op, _, betas = read
+    width = block_width(axis.extent.as_static())
+    if width is None:
+        return None
     view = fold.as_reduction()
-    outer, blk = _split_axis(axis)
-    pivot_axis, pivot_sigma = _block_binder(axis, outer, blk, "p")
-    chan_axis, chan_sigma = _block_binder(axis, outer, blk, "c")
+    outer = _split_axis(axis, width)
+    pivot_axis, pivot_sigma = _block_binder(axis, outer, width, "p")
+    chan_axis, chan_sigma = _block_binder(axis, outer, width, "c")
 
     lift, states = fold.lift, view.states
     score = lift.results[0]
@@ -309,7 +337,7 @@ def _blockable(fold: Fold, axis: Axis | None) -> bool:
     if axis is None or fold.combine is None or fold.observe is not None:
         return False
     window = axis.window
-    if window is not None and (window.block is not None or window.partition):
+    if window is not None and (window.block or window.partition):
         return False
     return axis.extent.is_static and axis.extent.as_static() > 1
 
@@ -355,19 +383,3 @@ def block_tree(root: Fold, axes: tuple) -> tuple[Fold, tuple[Axis, ...]] | None:
         return None
     fresh = {axis.name for axis in installed}
     return blocked, (*(axis for axis in axes if axis.name not in fresh), *installed)
-
-
-def bind_widths(axes: tuple, widths: Mapping[str, int]) -> tuple[Axis, ...]:
-    """The axis table with each block width bound — the ONE place a block stops being a symbol.
-
-    Only the table moves, because only the table ever named the width: the outer axis's ``step``
-    and the binder's extent. The term is untouched, which is why every block form of a kernel is
-    the same kernel.
-    """
-    values = {name: Literal(width, "int") for name, width in widths.items()}
-
-    def bound(axis: Axis) -> Axis:
-        step = axis.step.substitute(values) if axis.step is not None else None
-        return replace(axis, extent=Dim(simplify_extent(axis.extent.expr.substitute(values))), step=step)
-
-    return tuple(bound(axis) for axis in axes)

@@ -32,14 +32,14 @@ configs:
     origins:
     - softmax
   realizations:
-  - name: k_softmax_4cdd6b.607f9840e21f
+  - name: k_softmax_410311.c2ff3fd99c89
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       REDUCE: coop
       WORK: t128
-    identity: dc7785d9445bba15b04bd4997e393c8059e51258b76acc3ae619342e0cab8a14
+    identity: 8c922783ff5f536ef8f764d8588fff8ade2e8d15e8a2b1c17735e98088b65a4a
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.082112585311328

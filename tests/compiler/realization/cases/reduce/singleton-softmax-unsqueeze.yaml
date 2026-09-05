@@ -52,12 +52,12 @@ configs:
     - softmax
     - unsqueeze
   realizations:
-  - name: k_softmax_0b9f3d.41e84159178d
+  - name: k_softmax_e98f25.a1edcd8e45de
     bindings: {}
     pins:
       FAST_MATH: false
     knobs: {}
-    identity: 17357e5d59c708d651349751da550d296f6c9062f851a04224acab4e4bc15d43
+    identity: 8c9c0da084a59b3977f2445a931255f79563a4757af9dde1d9c74dd191fcef55
   - name: k_softmax_72a360.c39b5cb07eae.7e024132c3f0
     bindings: {}
     pins:

@@ -22,14 +22,14 @@ configs:
     origins:
     - matmul
   realizations:
-  - name: k_matmul_32a81d.1cb699819a8d
+  - name: k_matmul_377e9d.5494be3a6cfd
     bindings: {}
     pins:
       FAST_MATH: false
       PLACE: fuse
     knobs:
       REDUCE: g2a
-    identity: 5f8fc1ac11d6dc958a52064c7f402e636b3d2c4df741efe7d7ad8c33ed53ddd0
+    identity: 3241743f6c352ed3c82e6838266065564742213d4e12daba97193c5c7697d250
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 14.482086983279906

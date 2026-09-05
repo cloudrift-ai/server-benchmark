@@ -53,6 +53,28 @@ two folds over one axis in one loop, which would have the weight read a pivot th
 finished accumulating. `_scope`'s dependence guard already refuses that fuse, so the reason may no
 longer hold; that has to be checked rather than assumed.
 
+### Option 1 was implemented and measured, then reverted
+
+`_options` returning one choice for the pivot's copy takes the space from 2.3 × 10¹⁷ to
+5.0 × 10¹⁴ and the site's domain from 456 to 1. On the eight-head 512-key SDPA, four cold runs
+each with an empty tune DB and an empty online prior:
+
+| | run 1 | run 2 | run 3 | run 4 |
+| --- | --- | --- | --- | --- |
+| without the collapse | 176 µs | 177 µs | 175 µs | 175 µs |
+| with the collapse | 177 µs | **40 µs** | 178 µs | **41 µs** |
+
+So the collapse is what makes a 4.4× better arm reachable to the greedy at all — the best row a
+hand sweep of 36 pinned schedules found on that shape is 42 µs, and the collapsed cold pick
+reaches it. Which arm the greedy lands on then alternates, because the greedy BENCHES candidate
+rows and the cubin cache is warm on every second run.
+
+It is reverted for now. `tests/compiler/passes/test_flash_block.py` stops realizing its pinned row
+under pytest with the collapse in place — the same row compiles to four `mma.sync` through
+`emmy compile` and through a standalone script that runs the identical passes, so something in the
+test environment decides the fork differently and that is not understood. Shipping a 30-line
+projection change whose interaction with the pin path is not understood is worse than deferring it.
+
 **Neither is the whole factor.** After the duplicate goes, the space is still ~5 × 10¹⁴: the third
 site (`P·V`) is genuine, and its STAGE edges multiply on top. The block's two cross-site equations
 already cut the per-site domains hard (930 → 460 and 2282 → 456); what is left is the ordinary cost

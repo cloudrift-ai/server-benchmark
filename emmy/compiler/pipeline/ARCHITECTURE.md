@@ -819,9 +819,9 @@ different kernel families, and that is a fitting requirement on the prior. When 
 the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking
 (`_priced_pick`, the flat-list form kept for exactly these corners). **No leaf is
 withheld to keep a kernel set unchanged.** The one thing that does withdraw the splices is `price_structural=False`,
-which is not about speed: it is how `GreedyStrategy` retires a structural pick whose fragment kernel failed to LOWER
-(the splice minted fresh node ids, so it cannot be blocklisted at the fork site), and how a nested price probe
-avoids re-splitting the slice it is pricing.
+which is not about speed: it is how `GreedyStrategy` retires a structural pick once no row of a fragment kernel binds
+(a fragment's failure cannot be blocklisted at the structural fork site), and how a nested price probe avoids
+re-splitting the slice it is pricing.
 
 **Evidence joins tolerate stamps a row predates, and nothing else.** `Prior.sig_groups` is one contract for the
 reservoir, the evidence index (tune DB rows and golden rows alike) and the disqualification tier: a row describes a
@@ -837,8 +837,8 @@ the deploy's own context key — one regime, one key, one lane — and the pick 
 matching measured rows.
 
 **Retries are decide-wrappers over a deterministic re-resolve** — every other choice replays identically (cheap
-non-chronological backtracking, no snapshots). A structural pick that leaves a fragment kernel un-lowered retires
-structural picks wholesale and re-resolves the keep-fused branch before falling back to tile blocklisting.
+non-chronological backtracking, no snapshots). A fragment kernel's refused row blocklists at that piece's own schedule
+fork, so the composed route replays while the piece re-ranks; only once no row of it binds are structural picks retired.
 
 **Greedy validity fallback.** The whole greedy retry orchestration is search policy, owned by
 `policy/greedy.GreedyStrategy` — `Pipeline.run` is a thin entry point delegating to it. The prior ranks by

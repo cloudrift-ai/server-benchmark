@@ -53,12 +53,16 @@ arriving as ordinary statements.
 
 **Derived reads memoize on the immutable term; pickling carries only the stored params.** A term's
 expensive derived reads — the structural key, `Fold.deps`, `Lambda.free_names`, the synthesized
-`loop`, the normalize fixpoint stamp, the codec's spelling tables — ride the instance
-(`cached_property` entries and `structural.instance_memo` tables), which is sound because the term
-never changes, and is what keeps a walk over a large fused tree linear instead of re-deriving every
-subtree per ancestor. `__getstate__` strips them: every memo recomputes after transport, and an
-id-keyed cache carried across processes could collide with a fresh object's id. A memo holds only
-values derivable from the term — never decisions, never mutable policy.
+`loop`, the normalize fixpoint stamp, the codec's spelling tables — ride the instance, which is what
+keeps a walk over a large fused tree linear instead of re-deriving every subtree per ancestor. They
+are declared members: a `cached_property` on the type that owns the value, or a field computed in
+`__post_init__`, per STYLE.md. `__getstate__` strips them: every memo recomputes after transport,
+and an id-keyed cache carried across processes could collide with a fresh object's id. A memo holds
+only values derivable from the term — never decisions, never mutable policy.
+
+The `structural.instance_memo` tables are a holdout predating that rule, not a second sanctioned
+form. STYLE.md forbids the undeclared memo slot they stash into; new derived reads take a declared
+member, and the existing tables are to be converted to one.
 
 **Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term; the typed classic
 schedule, materialization, output specifications, and knobs belong to `TileOp`, not the term. So `Fold` lives in

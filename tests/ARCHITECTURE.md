@@ -110,7 +110,7 @@ the shared module already provides.
   serving-twin matrix for a named checkpoint and GPU. The serving-image release workflow owns exact
   model/revision/card qualification. Retain a small model fixture only when it proves reusable behavior that a
   synthetic input cannot.
-- **Do not load checked-in golden YAML in the per-commit suite — except the realization corpus.** Unit tests use
+- **Do not load checked-in golden YAML in the default suite — except the realization corpus.** Unit tests use
   synthetic records and working files, and the nightly `onboard-model` workflow owns repository schema validation,
   strict decode, and exact-GPU replay for `recipes/*/golden/*.yaml`. `tests/compiler/realization/cases/` differs on
   both counts that motivated the rule: its files are hand-minimized reproducers rather than model qualification
@@ -165,10 +165,13 @@ the shared module already provides.
 
 ## Running
 
+While developing, run only the tests that cover the change, under a two-minute budget. The whole suite takes many
+minutes and belongs to the finalization stage of a PR — see the Contribution Instructions in `AGENTS.md`.
+
 ```bash
-pytest tests/ -v                       # all tests (skips off-lane `perf` / `goldens` tests)
-pytest tests/deploy/test_recipe.py -v  # single file
-pytest tests/planner/ -v               # single directory
+pytest tests/deploy/test_recipe.py -v   # single file — the development lane
+pytest tests/deploy/ -k recipe -v      # a few tests — the development lane
+pytest tests/ -v                       # all tests, finalization only (skips off-lane `perf` / `goldens` tests)
 pytest tests/perf/ -m perf -v          # GPU perf suite (see tests/perf/ARCHITECTURE.md)
 pytest tests/compiler/pipeline/search/ -m goldens -v   # strict-decode the checked-in goldens (make test-goldens)
 ```
@@ -232,7 +235,7 @@ rows that actually changed.
 
 Repository golden *qualification* is intentionally outside pytest. Model goldens are GPU-specific qualification
 evidence, so the nightly `onboard-model` workflow validates the selected recipe-local file, strictly decodes every
-row, and replays it on the named GPU. This keeps expensive model/card qualification out of the per-commit suite. Only
+row, and replays it on the named GPU. This keeps expensive model/card qualification out of the default suite. Only
 the decode half is also reachable without the card, off the default lane (`make test-goldens` above) — it targets each
 record's declared capability; the measured replay is what the nightly's GPU is for.
 

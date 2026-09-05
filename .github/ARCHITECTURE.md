@@ -18,6 +18,14 @@ skills and CloudRift inference endpoint.
 There is no generic experiment workflow or GitHub dispatch input for `emmy bench`. Requested experiment runs start
 from a developer checkout through the tracked `.agents/skills/run-experiment` skill.
 
+## Pull-request body
+
+`PULL_REQUEST_TEMPLATE.md` fixes the shape of every PR: a title that describes the change functionally, an
+abstract of one plain-English paragraph and at most five bullets, an optional single artifact backing that
+abstract — a small table, a diagram, a few lines of output — a horizontal rule, and then the rest under
+headings chosen to fit the change. `Abstract` is the only fixed heading. The split exists so a reader can
+decide from the abstract alone whether the PR concerns them, which is why code references stay below the rule.
+
 ## Pull-request checks
 
 **Tests** runs three parallel jobs and installs the CI dependency set on Python 3.13. A newer commit cancels the

@@ -1,7 +1,13 @@
-# evidence: the softmax-V half of a head-dim-128 SDPA must keep offering its warp tier. The row below is a
-# recorded RTX 5090 golden (11.84 us, fast-math); today the kernel enumerates two rows, neither carrying an mma
-# TILE, and greedy falls to a scalar schedule measured at 1459.8 us. `offered` passes at 5719f823 and fails from
-# b93a86c2 (#691), which restamped the realization corpus for the new schedule codec but not the model goldens.
+# evidence: the softmax-V half of a head-dim-128 SDPA reaches no warp tier. This is #699's recorded debt — the fused
+# value channel on tensor cores, removed with `_derived_expect_fold` / `_twisted_derived_step` — the same gap
+# `sdpa-computed-value-cut-mma` carries. The P·V half rides the twist's carrier, so this kernel's only contraction site
+# is the score's QK reduce over `a3`, and no mma TILE is offered for the value channel. The row below is a recorded
+# RTX 5090 golden (11.84 us, fast-math) measured on the `attention.hd128.softmax_v` Loop target, a separate
+# softmax-then-value kernel `torch.sdpa` no longer traces to; its `STAGE d1/smem` is the computed-A compute fill, which
+# names no stage the score contraction can realize, so the pin is refused before a row is enumerated and greedy falls
+# to a scalar schedule. Closing the gap means the twist becomes the P·V site (`TILE@map.1/twist`); this row will also
+# need its STAGE keyed to that site, since as spelled it is refused at 5719f823 too, where the removed machinery
+# still stood.
 compute_cap:
 - 12
 - 0

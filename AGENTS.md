@@ -230,6 +230,9 @@ markdown habit, and it is wrong for this repo. Aim for lines in the 90–120 ran
 Table rows, ASCII diagrams, and long URLs may overflow past 120 if wrapping would hurt readability — that's the only
 acceptable reason to go wider. Python code stays under 140 chars (Ruff-enforced).
 
+A pull-request or issue body is not a file in the repo: write it in unwrapped paragraphs and let GitHub wrap them.
+Manual line breaks there only make it harder to edit.
+
 ## Contribution Instructions
 
 Two speeds. Development is fast: small test subsets, quick commits, no sweeps. Finalization is strict and runs

@@ -5,6 +5,9 @@ Not a component name, not a branch name, not a ticket id.
 Write this body, then revise it at least twice before posting. Each pass: read it as a reviewer who has no context,
 check it against the rules below and against the design philosophy in AGENTS.md, and cut. A first draft is always too
 long. Stop when nothing else can come out without losing the point.
+
+Do not hard-wrap the text you write here. GitHub wraps it for the reader, and manual line breaks only make the
+body hard to edit. The ~120-character rule applies to files in the repository, not to a pull-request body.
 -->
 
 ## Abstract

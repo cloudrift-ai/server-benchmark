@@ -31,6 +31,7 @@ from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, OutputSpec, Stmt, StridedLoop
+from emmy.compiler.ir.stmt.body import free_names
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
 # stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
@@ -848,7 +849,7 @@ class Fold:
             target = stmts if stmts is not None else sink(node)
             if term.axis not in coordinates:
                 raise ValueError(f"lower: no extent for reduce axis {term.axis!r} — the kernel's axis table names it")
-            target.append(_loop(coordinates[term.axis], Body(tuple(dict.fromkeys(inner)))))
+            target.append(_loop(coordinates[term.axis], _scope(inner)))
             attach(term, "state", target, node, scope)
 
         def assemble(path: tuple[str, ...]) -> Body:
@@ -856,10 +857,38 @@ class Fold:
             for name in opened[opened.index(path[-1]) + 1 :] if path else opened:
                 if (*path, name) in nest:
                     body.append(_loop(coordinates[name], assemble((*path, name))))
-            return Body(tuple(dict.fromkeys(body)))
+            return _scope(body)
 
         place(self, [], None)
         return assemble(())
+
+
+def _scope(stmts) -> Body:
+    """One scope's statements — a term reached through several operand positions defining its
+    names once, and sibling terms folding ONE coordinate iterating together.
+
+    The dedup is the shared-term rule. The FUSE is the same rule a level up: two loops over one
+    axis where neither reads what the other defines are two passes over one stream, and their
+    union is one pass — which is what puts a blocked carrier's expectation and its denominator in
+    one loop, computing the weight they both read once. A loop that DOES read the loop above it (a
+    statistic's pass, then the pass that normalizes by it) reads a FINISHED accumulator, and
+    iterating together would hand it the in-flight one; that pair stays two loops.
+    """
+    out: list[Stmt] = []
+    for stmt in dict.fromkeys(stmts):
+        prior = out[-1] if out else None
+        if (
+            isinstance(stmt, (Loop, StridedLoop))
+            and isinstance(prior, (Loop, StridedLoop))
+            and prior.is_reduce
+            and stmt.is_reduce
+            and replace(prior, body=stmt.body) == stmt
+            and not (free_names(stmt) & prior.body.ssa_defs)
+        ):
+            stmt = replace(prior, body=_scope((*prior.body, *stmt.body)))
+            out.pop()
+        out.append(stmt)
+    return Body(tuple(out))
 
 
 def _loop(axis: Axis, body: Body) -> Stmt:

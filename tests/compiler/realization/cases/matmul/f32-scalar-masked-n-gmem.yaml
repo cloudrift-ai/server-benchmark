@@ -22,7 +22,7 @@ configs:
     origins:
     - c
   realizations:
-  - name: k_matmul_89caea.61fe394718cd
+  - name: k_matmul_bd3a21.c07fbc53427d
     bindings: {}
     pins:
       FAST_MATH: false
@@ -30,7 +30,7 @@ configs:
       TILE: f2x4
       WORK: t16x8
       STAGE: ''
-    identity: ec393ad7dc075101adf699a46d7ba3f6ba1d174fd0ea43d64a9e1eedb988d8e9
+    identity: a3ca4f4c48bd5deb6679aae04072415db9d384c6993dcb4f16f7a8d8ff0ab6c9
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 2.838818187063391

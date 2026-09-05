@@ -100,10 +100,10 @@ the stream for nothing.
 
 It runs AFTER `030_cut` because a piece the cut mints is a different carrier from the one it came
 out of: attention cut at its value channel leaves a statistics piece whose channels are sums of the
-weight, and blocking ahead of the fork handed that piece a block it paid a second pass for. Each
-branch now blocks what its own term deserves. For the same reason no seam evaluated over a block
-coordinate is cuttable — a block is a working set INSIDE one kernel, and the piece's whole output
-would be one block.
+weight, and blocking ahead of the fork handed that piece a block it paid a second pass over the
+stream for — 18.8 ms on a 512-key head where the fused kernel is 128 µs. Each branch now blocks
+what its own term deserves. A block is still a working set INSIDE one kernel, so no seam evaluated
+over a block coordinate is cuttable either: the piece's whole output would be one block.
 
 The WIDTH is the form's: `block_width` is the largest power-of-two fraction of the extent within
 `MAX_BLOCK`, and a stream no wider than one block, or one a whole number of blocks does not fit, is

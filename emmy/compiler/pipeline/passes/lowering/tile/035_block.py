@@ -5,12 +5,14 @@ the stream's own extent) and idempotent (every axis it installs carries the rece
 no fork, adds no schedule family, and leaves one kernel identity per term. ``ir/tile/block.py``
 owns the rewrite and states why only a twisted carrier is blocked.
 
-It is a PASS rather than ``TileOp.__post_init__`` for one reason: the kernel-set cut runs at
-``030_cut``, and a piece it mints is a different carrier from the one it was cut out of. Attention
-cut at its value channel leaves a statistics piece whose channels are sums of the weight — nothing
-there becomes bilinear, so nothing there should be blocked, and blocking ahead of the cut would
-have handed that piece a block it pays a second pass for and gets nothing from. Running here, each
-branch of the cut fork blocks what its own term deserves.
+It is a PASS rather than ``TileOp.__post_init__``, and it runs AFTER ``030_cut``, for one reason: a
+piece the cut mints is a different carrier from the one it came out of. Attention cut at its value
+channel leaves a statistics piece whose channels are sums of the weight — nothing there becomes
+bilinear, so nothing there should be blocked, and blocking ahead of the fork handed that piece a
+block it paid a second pass over the stream for (an 18.8 ms piece on a 512-key head where the
+fused kernel is 128 µs). Running here, each branch of the fork blocks what its own term deserves.
+A block is still a working set inside ONE kernel, so no seam evaluated over a block coordinate is
+cuttable either (``_cut.cuttable_seams``).
 """
 
 from __future__ import annotations

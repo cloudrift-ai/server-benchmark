@@ -31,14 +31,14 @@ configs:
     - sqrt
     - sum_1
   realizations:
-  - name: k_sqrt_reduce.99a100857a83
+  - name: k_sqrt_reduce.e7d950fd55ae
     bindings: {}
     pins:
       FAST_MATH: false
       PLACE: fuse
     knobs:
       REDUCE: g2k
-    identity: eecc9a742e80715280713cff63056e7013ff903f509b2c3045b1546bc7c03b9f
+    identity: 14f37f7136db27dfee75fc93848b38d2f7fbcaf587c90260d48939cd8fc4911d
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 8.184049440466838
@@ -61,3 +61,21 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: f405c39633793e8bf8f3a9524027dfaaf6645549c10c03bcaaa7dc7a38d94914
+  - name: k_sqrt_reduce.e7d950fd55ae.1802c72b3900
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 1802c72b39004d4981157e39c99328782e4c11794dc7ac20ffec92ae37ae310c
+  - name: k_sqrt_reduce.e7d950fd55ae.e538d1fcd59d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: e538d1fcd59d77eb0d38f554d0d598ba60fbaf51a2bc27059c4fa95f83e562a0

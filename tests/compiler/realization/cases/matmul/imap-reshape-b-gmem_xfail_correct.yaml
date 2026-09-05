@@ -43,7 +43,7 @@ configs:
     - o
     - wr
   realizations:
-  - name: k_matmul_d92284.13b5934e39c9
+  - name: k_matmul_c3bc70.fbbd5f8a4183
     bindings: {}
     pins:
       FAST_MATH: false
@@ -53,4 +53,4 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-    identity: b5d2469fc598d4117b398f0704f7bd49257085ddb5f038bf1d0214f82be8add4
+    identity: d389ef4ac781b42bfd46a48e2fd4043b7d266749d7c93d1ce59ca45f24f47819

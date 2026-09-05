@@ -34,7 +34,7 @@ configs:
   target:
     loop: 0
   realizations:
-  - name: k_sdpa_6679cd.a781328aa577
+  - name: k_sdpa_893d20.d0bcbf49187a
     bindings: {}
     pins:
       FAST_MATH: true
@@ -45,7 +45,33 @@ configs:
       STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
-    identity: 444efd06c17763ea28ed4301e3440153b01b722db5352992ea83aeb3fed44c46
+    identity: 58fe741f732aeae7b57f8bcd921ab7c91e84933e1492f600ac818ee697374eec
+  - name: k_sdpa_893d20.d0bcbf49187a.835f8cdcbdf4
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist.1/reduce.1/inner: mma_m16n8k16_f16_f32/f1x8
+      TILE@map.1/twist.2/inner: mma_m16n8k16_f16_f32/f1x1/k4
+      TILE@map.1/twist.2/inner.1/map.1/inner: mma_m16n8k16_f16_f32/f1x8
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/reduce: ''
+      REDUCE@map.1/twist.1/reduce.1/inner: ''
+      REDUCE@map.1/twist.2/inner: ''
+      REDUCE@map.1/twist.2/inner.1/map.1/inner: ''
+      REDUCE@map.1/twist.3/reduce: ''
+      STAGE@map.1/twist.1/reduce.1/inner: ''
+      STAGE@map.1/twist.2/inner: d1/smem
+      STAGE@map.1/twist.2/inner.1/map.1/inner: ''
+      WORK: w1x1
+      RASTER: ''
+    identity: 835f8cdcbdf469ce1336e667055d746011d9586ecbf98bf80afdba168b1b304b
+  - name: k_sdpa_893d20.d0bcbf49187a.d3fd04f562bc
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs: {}
+    identity: d3fd04f562bcfc86ef391ee5e22de8373759f0574d65ecf9d9f5f48c53a6bcbf
 loops:
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]
@@ -85,22 +111,22 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null, step: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null, step: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null, step: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null}}
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 128}, window: null, step: null}}
                               body:
                                 body:
                                 - class: Load
@@ -145,12 +171,12 @@ loops:
                         seed: true
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null, step: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a4, extent: {dim: 128}, window: null}}
+                              axis: {class: Axis, fields: {name: a4, extent: {dim: 128}, window: null, step: null}}
                               body:
                                 body:
                                 - class: Load
@@ -194,17 +220,17 @@ loops:
                       fields: {name: v6, op: {elementwise: reciprocal}, args: {tuple: [acc3]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null, step: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a6, extent: {dim: 512}, window: null}}
+                              axis: {class: Axis, fields: {name: a6, extent: {dim: 512}, window: null, step: null}}
                               body:
                                 body:
                                 - class: Loop
                                   fields:
-                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 128}, window: null}}
+                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 128}, window: null, step: null}}
                                     body:
                                       body:
                                       - class: Load
@@ -284,6 +310,6 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_sdpa_6679cd
+      name: k_sdpa_893d20
     inputs: [scaled_dot_product_attention_scale, x0, x1, x2]
     outputs: [[scaled_dot_product_attention, f16, [1, 8, 512, 128]]]

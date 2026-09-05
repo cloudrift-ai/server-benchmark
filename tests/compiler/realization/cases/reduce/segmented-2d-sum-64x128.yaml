@@ -19,14 +19,14 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_o_reduce.eefcb0f6b6de
+  - name: k_o_reduce.49188b87cc4e
     bindings: {}
     pins:
       FAST_MATH: false
     knobs:
       REDUCE: coop
       WORK: t64
-    identity: 2416a19f64dcc700c3ec0206318f4edfb6611635d4d955cd6e510d73c9195679
+    identity: 338f40407b20f8e9a55926bb7161d6930b205098247b7d2bd7761f41989a645d
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 1.1071716564174243

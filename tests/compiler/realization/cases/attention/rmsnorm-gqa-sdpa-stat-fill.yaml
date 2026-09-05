@@ -1,6 +1,8 @@
 # evidence: Qwen3 target k_sdpa_mean_reduce_29d3df.171afed452e2.s512 dropped the same
 # Fold.combine=None statistic at materialization on sm_70, sm_89 and sm_120. This reduced GQA
-# slice preserves the zero-axis prologue whose first top-level reduce Loop is authored in its body.
+# slice preserves the zero-axis prologue whose first top-level reduce Loop is authored in its body. The row is the
+# site-keyed spelling of the same schedule after blocking split the carrier: the statistic fill it exists for is
+# STAGE@map.1/twist.1/reduce.1/inner, where the bare STAGE used to reach it.
 compute_cap:
 - 8
 - 0
@@ -46,7 +48,7 @@ configs:
     - out
     - qn
   realizations:
-  - name: k_sdpa_rms_norm_reduce_2333c1.836bf20d95c9
+  - name: k_sdpa_rms_norm_reduce_699e75.e217edae53fd
     bindings: {}
     pins:
       FAST_MATH: true
@@ -54,7 +56,48 @@ configs:
     knobs:
       WORK: w1x1
       RASTER: ''
-      TILE: mma_m16n8k16_f16_f32/f1x1
-      REDUCE: ''
-      STAGE: d1/smem
-    identity: 2e4f9df326a0b643261c16277b0189933d0c131e15a02fe4319cbd80b5b917cd
+      TILE@map.1/twist.1/reduce.1/inner: mma_m16n8k16_f16_f32/f1x8
+      TILE@map.1/twist.2/inner: mma_m16n8k16_f16_f32/f1x1/k4
+      TILE@map.1/twist.2/inner.1/map.1/inner: mma_m16n8k16_f16_f32/f1x8
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/reduce: ''
+      REDUCE@map.1/twist.1/reduce.1/inner: ''
+      REDUCE@map.1/twist.1/reduce.1/inner.1/map.3/map.1/reduce: ''
+      REDUCE@map.1/twist.1/reduce.1/inner.2/map.3/map.1/reduce: ''
+      REDUCE@map.1/twist.2/inner: ''
+      REDUCE@map.1/twist.2/inner.1/map.1/inner: ''
+      REDUCE@map.1/twist.2/inner.1/map.1/inner.2/map.3/map.1/reduce: ''
+      REDUCE@map.1/twist.3/reduce: ''
+      STAGE@map.1/twist.1/reduce.1/inner: d1/smem
+      STAGE@map.1/twist.2/inner: d1/smem
+      STAGE@map.1/twist.2/inner.1/map.1/inner: d1/smem
+    identity: 70d546b0b80d69d3d71f51761d632dde84b12c9bdf2b986dbd10e2371e941305
+  - name: k_sdpa_rms_norm_reduce_699e75.e217edae53fd.15b4b196be6f
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs: {}
+    identity: 15b4b196be6f8ccecb2150b2c6063b2d85fef954a1cb53173352454c60949cb4
+  - name: k_sdpa_rms_norm_reduce_699e75.e217edae53fd.63933b4691fc
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist.1/reduce.1/inner: mma_m16n8k16_f16_f32/f1x8
+      TILE@map.1/twist.2/inner: mma_m16n8k16_f16_f32/f1x1/k4
+      TILE@map.1/twist.2/inner.1/map.1/inner: mma_m16n8k16_f16_f32/f1x8
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/reduce: ''
+      REDUCE@map.1/twist.1/reduce.1/inner: ''
+      REDUCE@map.1/twist.1/reduce.1/inner.1/map.3/map.1/reduce: ''
+      REDUCE@map.1/twist.1/reduce.1/inner.2/map.3/map.1/reduce: ''
+      REDUCE@map.1/twist.2/inner: ''
+      REDUCE@map.1/twist.2/inner.1/map.1/inner: ''
+      REDUCE@map.1/twist.2/inner.1/map.1/inner.2/map.3/map.1/reduce: ''
+      REDUCE@map.1/twist.3/reduce: ''
+      STAGE@map.1/twist.1/reduce.1/inner: d1/smem
+      STAGE@map.1/twist.2/inner: d1/smem
+      STAGE@map.1/twist.2/inner.1/map.1/inner: d1/smem
+      WORK: w1x1
+      RASTER: ''
+    identity: 63933b4691fcbc7252daf9757b6eafb03610f0d62c3b3ebbd8139c9553b72eb5

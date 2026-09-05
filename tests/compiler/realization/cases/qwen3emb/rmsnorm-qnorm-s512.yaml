@@ -22,7 +22,7 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_rms_norm_5bf711.6088d86dc0d0
+  - name: k_rms_norm_971a31.2d340b6e5b8d
     bindings: {}
     pins:
       FAST_MATH: false
@@ -30,7 +30,7 @@ configs:
       REDUCE: coop
       RASTER: ''
       WORK: t128
-    identity: ec6fe9cc9ebd5ea9f48750e26987cf922d3ffdec7dba01b2ab052e2ebaffc0bf
+    identity: 8586d4b640a144e0139c9eb6001301b18c5f1b2f4c5ad35af6ae2de49547b583
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 4.814995083831934

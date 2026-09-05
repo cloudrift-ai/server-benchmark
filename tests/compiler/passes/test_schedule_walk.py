@@ -414,9 +414,9 @@ def test_a_sweep_carrying_store_keeps_a_member_serial_only_when_the_member_reads
     catalog stands — the binder realizes exactly that (``_factorize``'s sweep gate reads the root's
     free axes)."""
     red = _chain_member("acc", "k", "x", _provider())
-    spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=Axis("j", 4))
+    spec = OutputSpec(write=Write(output="o", index=(Var("m"), Var("j")), value="v"), sweep=(Axis("j", 4),))
     assert _classic._reduction_domain(_tile_stub(_chain_root(red), (spec,)), red) == _member_catalog()
-    over = OutputSpec(write=Write(output="o", index=(Var("m"),), value="v"), sweep=Axis("m", 4))
+    over = OutputSpec(write=Write(output="o", index=(Var("m"),), value="v"), sweep=(Axis("m", 4),))
     assert _classic._reduction_domain(_tile_stub(_chain_root(red), (over,)), red) == (Reduce(),)
 
 
@@ -434,7 +434,7 @@ def test_a_streamed_store_keeps_chain_members_serial(unpinned) -> None:
     scan, _trailing = scan_from_loop(Loop(axis=Axis("j", 4), body=scan_body))
     assert scan.observe is not None
     red = _chain_member("acc", "k", "x", _provider())
-    spec = OutputSpec(write=Write(output="running", index=(Var("m"), Var("j")), value=scan.observe.results[0]), sweep=None)
+    spec = OutputSpec(write=Write(output="running", index=(Var("m"), Var("j")), value=scan.observe.results[0]), sweep=())
     assert _classic._reduction_domain(_tile_stub(_chain_root(scan, red), (spec,)), red) == (Reduce(),)
 
 
@@ -476,7 +476,7 @@ def test_a_contraction_chain_member_inherits_the_member_domain(unpinned) -> None
     root = _chain_root(con)
     assert _per_cell_reductions(root) == set(_member_catalog())
 
-    swept = OutputSpec(write=Write(output="o", index=(Var("m"),), value="v"), sweep=Axis("m", 4))
+    swept = OutputSpec(write=Write(output="o", index=(Var("m"),), value="v"), sweep=(Axis("m", 4),))
     assert _per_cell_reductions(root, (swept,)) == {Reduce()}
 
 

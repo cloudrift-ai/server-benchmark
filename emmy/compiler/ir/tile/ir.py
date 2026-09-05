@@ -107,35 +107,51 @@ def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> Bo
     """Reassemble the EFFECTFUL stmt stream from a pure statement STREAM + the kernel-boundary
     output specifications — the materializer's spelling, where the grid binds every free axis
     and nothing is a term: a store appends as the kernel tail, consecutive ``sweep`` stores on one
-    axis wrap the trailing run of stmts reading that axis (:func:`_sweep_start`) into one per-cell
-    output ``Loop``, and a store over OBSERVED values streams into its reduce loop when that loop
-    is present. The ONE reconstitution rule the scheduler's tail gates, the materializer's
+    axis path wrap the trailing run of stmts reading that path's axes (:func:`_sweep_start`) into
+    a per-cell output ``Loop`` nest, and a store over OBSERVED values streams into its reduce loop
+    when that loop is present. A group's loops open innermost-out along its path, stopping at the
+    deepest PREFIX a later spec's path also carries — the last group carrying a shared prefix
+    opens those loops, each wrapping every store and nest already built inside its trailing run —
+    so one source loop is opened exactly once however many specs rode it. (Prefixes, not names:
+    sibling nests legitimately reuse inner axis names, and only an identical prefix is the same
+    source loop.) The ONE reconstitution rule the scheduler's tail gates, the materializer's
     zero-axis ``Fold`` peel and ``030_cut`` share, so the lowered kernels stay byte-identical to
-    the stored-``Write`` era. A TERM places its stores itself (:meth:`Fold.lower`).
-
-    A spec bounded on a shared output axis (``OutputSpec.guard``) contributes its store — and, on
-    a sweep, the trailing run the sweep wraps — under that bound, so the cells past the region's
-    own extent compute and do not store."""
+    the stored-``Write`` era. A TERM places its stores itself (:meth:`Fold.lower`)."""
     out = list(stmts)
     stores = list(specs)
     index = 0
     while index < len(stores):
         st = stores[index]
-        if st.sweep is None:
+        if not st.sweep:
             # At term level — the fold not yet a ``Loop`` — an observed store keeps its post-node
             # position, which is also where extraction's round-trip gate expects it.
             if not (observed and set(st.write.values) <= observed and _splice_streamed(out, st.write)):
-                out.extend(st.guarded((st.write,)))
+                out.append(st.write)
             index += 1
             continue
         end = index + 1
-        while end < len(stores) and stores[end].sweep == st.sweep and stores[end].guard == st.guard:
+        while end < len(stores) and stores[end].sweep == st.sweep:
             end += 1
-        start = _sweep_start(out, st.sweep.name)
-        run = (*out[start:], *(store.write for store in stores[index:end]))
-        out = [*out[:start], Loop(axis=st.sweep, body=Body(st.guarded(run)))]
+        later = stores[end:]
+        writes = tuple(store.write for store in stores[index:end])
+        if _shares_prefix(later, st.sweep, len(st.sweep)):
+            out.extend(writes)  # the last group with this path opens the loop and collects these
+        else:
+            start = _sweep_start(out, st.sweep[-1].name)
+            out = [*out[:start], Loop(axis=st.sweep[-1], body=Body((*out[start:], *writes)))]
+            for depth in range(len(st.sweep) - 1, 0, -1):
+                if _shares_prefix(later, st.sweep, depth):
+                    break  # a shared prefix stays open for its last carrier (sharing is monotone)
+                axis = st.sweep[depth - 1]
+                start = _sweep_start(out, axis.name)
+                out = [*out[:start], Loop(axis=axis, body=Body(tuple(out[start:])))]
         index = end
     return Body(tuple(out))
+
+
+def _shares_prefix(later, path: tuple, length: int) -> bool:
+    """Whether a spec in ``later`` rides the same source loops as ``path``'s first ``length``."""
+    return any(spec.sweep[:length] == path[:length] for spec in later)
 
 
 def _dense_axis_suffix(index: tuple, name: str) -> bool:
@@ -178,10 +194,10 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
     """
     if not specs:
         return None
-    if len(free) == 1 and all(spec.sweep is None for spec in specs):
+    if len(free) == 1 and all(not spec.sweep for spec in specs):
         n_name = free[0].name
-    elif not free and all(spec.sweep is not None for spec in specs) and len({spec.sweep.name for spec in specs}) == 1:
-        n_name = specs[0].sweep.name
+    elif not free and all(len(spec.sweep) == 1 for spec in specs) and len({spec.sweep[0].name for spec in specs}) == 1:
+        n_name = specs[0].sweep[0].name
     else:
         return None
     for spec in specs:
@@ -192,14 +208,46 @@ def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) ->
     return Axis("_um", Dim(1))
 
 
+def _sweep_specs(loop: Loop, outer: tuple) -> tuple[list, list[OutputSpec]] | None:
+    """One write-only output ``Loop`` (nests included) as ``(pure prefix, sweep specs)`` under the
+    ``outer`` axis path — ``None`` when a non-pure member other than a store or nested output loop
+    remains past the pure prefix. Specs come back in stream order — the store and nest positions
+    the source spelled, writes and nested loops interleaved as they stood — every path prefixed
+    with this loop's axis. The PATH is the one fact reconstitution cannot re-derive: a write's
+    index names its coordinates but not the loop nest's order, so the spec stores exactly what
+    extraction destroyed. A nested loop that rejoins a pure prefix ends the run, so a store or
+    nest ahead of it stays an impure member and the split declines — conservative, and the
+    round-trip gate would refuse the spelling anyway."""
+    path = (*outer, loop.axis)
+    inner = list(loop.body)
+    tail: list[OutputSpec] = []
+    while inner:
+        last = inner[-1]
+        if isinstance(last, Write):
+            tail.insert(0, OutputSpec(write=inner.pop(), sweep=path))
+            continue
+        if isinstance(last, Loop) and not last.is_reduce:
+            nested = _sweep_specs(inner.pop(), path)
+            if nested is None:
+                return None
+            prefix, group = nested
+            tail[0:0] = group
+            if prefix:
+                inner.extend(prefix)  # a rejoined prefix is pure, so it also ends the store run
+                break
+            continue
+        break
+    return (inner, tail) if tail and all(s.pure for s in inner) else None
+
+
 def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...]] | None:
     """Split an effectful projection stmt stream into ``(pure stmts, OutputSpec decorations)`` — the
     conversion-side inverse of :func:`apply_output_specs`, valid ONLY when the reconstitution
     round-trips byte-identically (checked here; ``None`` otherwise). The trailing run of root
-    ``Write`` stmts and output loops splits off: a write is a plain spec, an output loop (a non-reduce
-    ``Loop`` whose writes end its body — sibling sweeps included) gives one ``sweep`` spec per write
-    over its axis, its pure prefix rejoining the stream. An already-pure stream returns
-    ``(stmts, ())``."""
+    ``Write`` stmts and output loops splits off: a write is a plain spec, an output loop (a
+    non-reduce ``Loop`` holding writes and nested output loops — sibling sweeps included) gives
+    one ``sweep`` spec per write over its axis PATH (:func:`_sweep_specs`), its pure prefix
+    rejoining the stream. An already-pure stream returns ``(stmts, ())``."""
     original = tuple(stmts)
     rest = list(stmts)
     stores: list[OutputSpec] = []
@@ -208,15 +256,11 @@ def extract_output_specs(stmts) -> tuple[tuple[Stmt, ...], tuple[OutputSpec, ...
         if isinstance(last, Write):
             stores.insert(0, OutputSpec(write=rest.pop()))
             continue
-        if isinstance(last, Loop) and not last.is_reduce:
-            inner = list(last.body)
-            writes: list[Write] = []
-            while inner and isinstance(inner[-1], Write):
-                writes.insert(0, inner.pop())
-            if writes and all(s.pure for s in inner):
-                stores[0:0] = [OutputSpec(write=write, sweep=last.axis) for write in writes]
-                rest = [*rest[:-1], *inner]
-                continue
+        if isinstance(last, Loop) and not last.is_reduce and (swept := _sweep_specs(last, ())) is not None:
+            prefix, group = swept
+            stores[0:0] = group
+            rest = [*rest[:-1], *prefix]
+            continue
         break
     if all(s.pure for s in rest) and apply_output_specs(rest, stores) == original:
         return tuple(rest), tuple(stores)
@@ -313,28 +357,19 @@ class TileOp(Op):
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
 
-        # An output sweep a contraction is evaluated over moves onto the placement's free axes, so
-        # the grid parallelises that contraction. WHICH axes those are was settled at formation
-        # (``_fromloop._shared_output_axis``): sibling regions of different widths already share one
-        # axis, the widest, so this promotes one axis per shared output extent and the grid
-        # enumerates the kernel's output cells once rather than their cartesian product.
+        # Only the kernel's SHARED output sweep — an axis every store rides — promotes: hoisting it replicates
+        # nothing but the statistics ahead of the sweep, while a sibling nest's axis would replicate every
+        # other nest per cell (DeepSeek-V4 post4096's root: four nests, a 2^56-cell grid).
         contractions = tuple(site.node for site in sites(normalized) if site.node.as_contraction() is not None)
-        promoted = {
-            store.sweep.name
-            for store in self.output_specs
-            if store.sweep is not None and any(any(store.sweep.name in edge.free_axes for edge in con.operands) for con in contractions)
-        }
+        shared = set.intersection(*({axis.name for axis in store.sweep} for store in self.output_specs)) if self.output_specs else set()
+        promoted = {name for name in shared if any(any(name in edge.free_axes for edge in con.operands) for con in contractions)}
         if not promoted:
             self._own_axes()
             self._validate_schedule()
             return
         free_names = {axis.name for axis in self.place.free}
         extra = tuple(
-            {
-                store.sweep.name: store.sweep
-                for store in self.output_specs
-                if store.sweep is not None and store.sweep.name in promoted - free_names
-            }.values()
+            {axis.name: axis for store in self.output_specs for axis in store.sweep if axis.name in promoted - free_names}.values()
         )
         if extra:
             free = (*self.place.free, *extra)
@@ -347,7 +382,9 @@ class TileOp(Op):
             self,
             "output_specs",
             tuple(
-                replace(store, sweep=None) if store.sweep is not None and store.sweep.name in promoted else store
+                replace(store, sweep=tuple(axis for axis in store.sweep if axis.name not in promoted))
+                if any(axis.name in promoted for axis in store.sweep)
+                else store
                 for store in self.output_specs
             ),
         )
@@ -366,7 +403,7 @@ class TileOp(Op):
         for axis in self.place.free:
             table.setdefault(axis.name, axis)
         needed = {site.node.axis for site in sites(self.op) if site.node.axis is not None}
-        needed |= {spec.sweep.name for spec in self.output_specs if spec.sweep is not None}
+        needed |= {axis.name for spec in self.output_specs for axis in spec.sweep}
         if missing := needed - table.keys():
             raise ValueError(
                 f"TileOp {self.name!r}: the axis table has no extent for {sorted(missing)} — "

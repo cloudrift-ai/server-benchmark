@@ -33,7 +33,7 @@ from emmy.compiler.ir.schedule.classic_projection import (
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import carries_partition
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
-from emmy.compiler.pipeline.fork import Fork
+from emmy.compiler.pipeline.fork import SCHEDULE_FORK_STAMPS, Fork
 
 # NOTE: no ``Knob`` objects (``TILE`` / ``REDUCE`` / ``STAGE``) may be imported here — ``Pass.load``
 # scans rule modules for ``Knob`` attrs and OFF-fills any it finds bare onto every variant of the
@@ -70,7 +70,8 @@ def classic_forks(tile: TileOp, name: str, knobs: dict, ctx) -> list[Fork]:
         schedule_pin_fingerprint(),
         tile.split_consumed,
     )
-    prefix = {"S_warp_eligible": 1.0} if any(choice.tile.is_warp for choices in domains.nodes.values() for choice in choices) else {}
+    warp = any(choice.tile.is_warp for choices in domains.nodes.values() for choice in choices)
+    prefix = dict.fromkeys(SCHEDULE_FORK_STAMPS, 1.0) if warp else {}
     descent_bound = len(domains.kernel) + sum(
         len(choices) * max((len(domains.edges[edge]) for edge in domains.edges if edge[0] == site), default=1)
         for site, choices in domains.nodes.items()

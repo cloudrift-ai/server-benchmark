@@ -1679,7 +1679,7 @@ configs:
   target:
     loop: 1
   realizations:
-  - name: k_linear_reduce_0cfd5e.dee2f06bc544
+  - name: k_linear_reduce_d0a3a9.ee41d0acb382
     bindings: {}
     pins:
       FAST_MATH: false
@@ -1690,7 +1690,38 @@ configs:
       REDUCE: ''
       STAGE: d1/smem-async
       RASTER: ''
-    identity: 024b8e556473076a79acbdef278e11d50fd8aeacc26cf8f7eca801dd7f254fde
+    identity: fc7cd092faad82175f6f259fa67c2b084fe6960bb87807e145e7d0b93d7519ef
+  - name: k_linear_reduce_d0a3a9.ee41d0acb382.2b9acbf43ff8
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      TILE@map.1/map.2/reduce.1/inner: ''
+      TILE@map.1/map.2/reduce.2/inner: ''
+      TILE@map.1/map.4/inner: ''
+      TILE@map.1/map.5/inner: ''
+      TILE@map.1/map.6/inner: ''
+      TILE@map.2/map.2/reduce.1/inner: ''
+      TILE@map.2/map.2/reduce.2/inner: ''
+      REDUCE@map.1/map.2/reduce: ''
+      REDUCE@map.1/map.2/reduce.1/inner: ''
+      REDUCE@map.1/map.2/reduce.2/inner: ''
+      REDUCE@map.1/map.4/inner: ''
+      REDUCE@map.1/map.5/inner: ''
+      REDUCE@map.1/map.6/inner: ''
+      REDUCE@map.2/map.2/reduce: ''
+      REDUCE@map.2/map.2/reduce.1/inner: ''
+      REDUCE@map.2/map.2/reduce.2/inner: ''
+      STAGE@map.1/map.2/reduce.1/inner: ''
+      STAGE@map.1/map.2/reduce.2/inner: ''
+      STAGE@map.1/map.4/inner: ''
+      STAGE@map.1/map.5/inner: ''
+      STAGE@map.1/map.6/inner: ''
+      STAGE@map.2/map.2/reduce.1/inner: ''
+      STAGE@map.2/map.2/reduce.2/inner: ''
+      WORK: ''
+      RASTER: ''
+    identity: 2b9acbf43ff8f9aab0776baa5df7962545bca44c118ebe66b271d2e51811608c
 loops:
 - inputs: [x]
   outputs: [x_static_fp4_scale_bits, x_static_fp4_bits]
@@ -1795,17 +1826,17 @@ loops:
           fields: {name: v4, op: {elementwise: reciprocal}, args: {tuple: [v3]}, dtype: null}
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null, step: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 256}, window: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 256}, window: null, step: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 16}, window: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 16}, window: null, step: null}}
                         body:
                           body:
                           - class: Load
@@ -1833,48 +1864,24 @@ loops:
                               value: v5
                               op: {elementwise: maximum}
                               dtype: null
+                              axes: {tuple: [a2_s2]}
+                              base: null
+                          - class: Assign
+                            fields: {name: v6, op: {elementwise: abs}, args: {tuple: [in4]}, dtype: {dtype: f32}}
+                          - class: Accum
+                            fields:
+                              name: acc1
+                              value: v6
+                              op: {elementwise: maximum}
+                              dtype: null
                               axes: {tuple: [a2_s1]}
                               base: null
                         unroll: false
                         seed: true
                     - class: Assign
-                      fields: {name: v6, op: {elementwise: multiply}, args: {tuple: [acc0, v1]}, dtype: null}
-                    - class: Loop
-                      fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 16}, window: null}}
-                        body:
-                          body:
-                          - class: Load
-                            fields:
-                              names: {tuple: [in5]}
-                              input: x
-                              index:
-                                tuple:
-                                - {expr: {var: a0}}
-                                - expr:
-                                    binary:
-                                      op: +
-                                      left:
-                                        binary:
-                                          op: '*'
-                                          left: {binary: {op: /, left: {var: a1}, right: {literal: {value: 8, dtype: int}}}}
-                                          right: {literal: {value: 16, dtype: int}}
-                                      right: {var: a3}
-                              dtype: null
-                          - class: Assign
-                            fields: {name: v7, op: {elementwise: abs}, args: {tuple: [in5]}, dtype: {dtype: f32}}
-                          - class: Accum
-                            fields:
-                              name: acc1
-                              value: v7
-                              op: {elementwise: maximum}
-                              dtype: null
-                              axes: {tuple: [a3_s1]}
-                              base: null
-                        unroll: false
-                        seed: true
+                      fields: {name: v7, op: {elementwise: multiply}, args: {tuple: [acc0, v1]}, dtype: null}
                     - class: Assign
-                      fields: {name: v8, op: {elementwise: to_f8e4m3}, args: {tuple: [v6]}, dtype: {dtype: f8e4m3}}
+                      fields: {name: v8, op: {elementwise: to_f8e4m3}, args: {tuple: [v7]}, dtype: {dtype: f8e4m3}}
                     - class: Assign
                       fields: {name: v9, op: {elementwise: multiply}, args: {tuple: [acc1, v2]}, dtype: null}
                     - class: Assign
@@ -1897,7 +1904,7 @@ loops:
                       fields: {name: v18, op: {elementwise: maximum}, args: {tuple: [in0, v16]}, dtype: null}
                     - class: Load
                       fields:
-                        names: {tuple: [in6]}
+                        names: {tuple: [in5]}
                         input: x
                         index:
                           tuple:
@@ -1911,12 +1918,12 @@ loops:
                     - class: Assign
                       fields: {name: v19, op: {elementwise: copy}, args: {tuple: [v17]}, dtype: {dtype: f32}}
                     - class: Assign
-                      fields: {name: v20, op: {elementwise: divide}, args: {tuple: [in6, v18]}, dtype: null}
+                      fields: {name: v20, op: {elementwise: divide}, args: {tuple: [in5, v18]}, dtype: null}
                     - class: Assign
                       fields: {name: v21, op: {elementwise: maximum}, args: {tuple: [in0, v19]}, dtype: null}
                     - class: Load
                       fields:
-                        names: {tuple: [in7]}
+                        names: {tuple: [in6]}
                         input: x
                         index:
                           tuple:
@@ -1926,7 +1933,7 @@ loops:
                     - class: Assign
                       fields: {name: v22, op: {elementwise: to_f4e2m1}, args: {tuple: [v20]}, dtype: {dtype: i32}}
                     - class: Assign
-                      fields: {name: v23, op: {elementwise: divide}, args: {tuple: [in7, v21]}, dtype: null}
+                      fields: {name: v23, op: {elementwise: divide}, args: {tuple: [in6, v21]}, dtype: null}
                     - class: Assign
                       fields: {name: v24, op: {elementwise: left_shift}, args: {tuple: [v22, in1]}, dtype: null}
                     - class: Assign
@@ -1947,17 +1954,17 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null, step: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 16}, window: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 16}, window: null, step: null}}
                         body:
                           body:
                           - class: Load
                             fields:
-                              names: {tuple: [in8]}
+                              names: {tuple: [in7]}
                               input: x
                               index:
                                 tuple:
@@ -1966,17 +1973,17 @@ loops:
                                     binary:
                                       op: +
                                       left: {binary: {op: '*', left: {var: a1}, right: {literal: {value: 16, dtype: int}}}}
-                                      right: {var: a4}
+                                      right: {var: a3}
                               dtype: null
                           - class: Assign
-                            fields: {name: v28, op: {elementwise: abs}, args: {tuple: [in8]}, dtype: {dtype: f32}}
+                            fields: {name: v28, op: {elementwise: abs}, args: {tuple: [in7]}, dtype: {dtype: f32}}
                           - class: Accum
                             fields:
                               name: acc2
                               value: v28
                               op: {elementwise: maximum}
                               dtype: null
-                              axes: {tuple: [a4_s1]}
+                              axes: {tuple: [a3_s1]}
                               base: null
                         unroll: false
                         seed: true
@@ -1996,7 +2003,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_reshape_reduce_ea1995
+      name: k_reshape_reduce_a2ebc9
     inputs: [x_static_fp4_floor, x_static_fp4_shift, x_static_fp4_f4_max, x_static_fp4_scale_2, x]
     outputs: [[x_static_fp4_scale_bits, f8e4m3, [128, 32, 1]], [x_static_fp4_bits, f4e2m1x2, [128, 256]]]
 - inputs: [x_static_fp4_scale_bits, x_static_fp4_bits]
@@ -2652,22 +2659,22 @@ loops:
           fields: {name: v5, op: {elementwise: reciprocal}, args: {tuple: [v4]}, dtype: null}
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null, step: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 256}, window: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 256}, window: null, step: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 16}, window: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 16}, window: null, step: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 512}, window: null}}
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 512}, window: null, step: null}}
                               body:
                                 body:
                                 - class: Load
@@ -2818,7 +2825,7 @@ loops:
                             fields: {name: v22, op: {elementwise: reciprocal}, args: {tuple: [v21]}, dtype: null}
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a4, extent: {dim: 512}, window: null}}
+                              axis: {class: Axis, fields: {name: a4, extent: {dim: 512}, window: null, step: null}}
                               body:
                                 body:
                                 - class: Load
@@ -2984,7 +2991,7 @@ loops:
                       fields: {name: v41, op: {elementwise: from_f8e4m3}, args: {tuple: [v39]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 512}, window: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 512}, window: null, step: null}}
                         body:
                           body:
                           - class: Load
@@ -3124,7 +3131,7 @@ loops:
                       fields: {name: v56, op: {elementwise: from_f8e4m3}, args: {tuple: [v53]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a6, extent: {dim: 512}, window: null}}
+                        axis: {class: Axis, fields: {name: a6, extent: {dim: 512}, window: null, step: null}}
                         body:
                           body:
                           - class: Load
@@ -3259,7 +3266,7 @@ loops:
                       fields: {name: v73, op: {elementwise: reciprocal}, args: {tuple: [v72]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a7, extent: {dim: 512}, window: null}}
+                        axis: {class: Axis, fields: {name: a7, extent: {dim: 512}, window: null, step: null}}
                         body:
                           body:
                           - class: Load
@@ -3412,7 +3419,7 @@ loops:
                       fields: {name: v95, op: {elementwise: reciprocal}, args: {tuple: [v94]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a8, extent: {dim: 512}, window: null}}
+                        axis: {class: Axis, fields: {name: a8, extent: {dim: 512}, window: null, step: null}}
                         body:
                           body:
                           - class: Load
@@ -3574,17 +3581,17 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null, step: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a9, extent: {dim: 16}, window: null}}
+                        axis: {class: Axis, fields: {name: a9, extent: {dim: 16}, window: null, step: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a10, extent: {dim: 512}, window: null}}
+                              axis: {class: Axis, fields: {name: a10, extent: {dim: 512}, window: null, step: null}}
                               body:
                                 body:
                                 - class: Load
@@ -3728,7 +3735,7 @@ loops:
                             fields: {name: v137, op: {elementwise: reciprocal}, args: {tuple: [v136]}, dtype: null}
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a11, extent: {dim: 512}, window: null}}
+                              axis: {class: Axis, fields: {name: a11, extent: {dim: 512}, window: null, step: null}}
                               body:
                                 body:
                                 - class: Load
@@ -3892,7 +3899,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_reduce_0cfd5e
+      name: k_linear_reduce_d0a3a9
     inputs: [p_gate_weight_scale_2, x_static_fp4_scale_2, p_up_weight_scale_2, silu_one, mul_static_fp4_floor, mul_static_fp4_scale_2, mul_static_fp4_f4_max,
       mul_static_fp4_shift, p_gate_weight_scale_bits, x_static_fp4_scale_bits, p_gate_weight_bits, x_static_fp4_bits, p_gate_weight_f4_pairs,
       x_static_fp4_r1_f4_pairs, p_up_weight_scale_bits, x_static_fp4_r2_f4_pairs, p_up_weight_bits, p_up_weight_f4_pairs]
@@ -4186,17 +4193,17 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 128}, window: null, step: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 512}, window: null, step: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 512}, window: null, step: null}}
                         body:
                           body:
                           - class: Load
@@ -4330,7 +4337,7 @@ loops:
                   seed: true
             unroll: false
             seed: true
-      name: k_linear_7dc98b
+      name: k_linear_e7c35a
     inputs: [p_down_weight_scale_2, mul_static_fp4_scale_2, mul_static_fp4_bits, p_down_weight_scale_bits, mul_static_fp4_scale_bits, p_down_weight_bits,
       mul_static_fp4_r1_f4_pairs, p_down_weight_f4_pairs]
     outputs: [[linear_2, f16, [128, 512]]]

@@ -115,12 +115,12 @@ def test_tile_post_init_does_not_infer_a_unit_row_from_a_non_dense_boundary(inde
 
 
 def test_contraction_promotes_a_shared_store_sweep_once() -> None:
-    stores = tuple(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=N16) for _ in range(2))
+    stores = tuple(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=(N16,)) for _ in range(2))
 
     tile = _tile(_matmul(), N16, K32, free=(M8,), output_specs=stores)
 
     assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
-    assert all(store.sweep is None for store in tile.output_specs)
+    assert all(store.sweep == () for store in tile.output_specs)
 
 
 def test_contraction_promotes_a_shared_store_sweep_after_grid_mapping() -> None:
@@ -130,13 +130,13 @@ def test_contraction_promotes_a_shared_store_sweep_after_grid_mapping() -> None:
         op=normalized,
         place=Placement(free=(M8,), grid=(M8,), mapped=True),
         axes=(M8, N16, K32),
-        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=N16),),
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="acc"), sweep=(N16,)),),
     )
 
     assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
     assert tuple(axis.name for axis in tile.place.grid) == ("m", "n")
     assert tile.place.is_mapped
-    assert tile.output_specs[0].sweep is None
+    assert tile.output_specs[0].sweep == ()
 
 
 def test_nested_contraction_promotes_a_shared_store_sweep() -> None:
@@ -150,11 +150,36 @@ def test_nested_contraction_promotes_a_shared_store_sweep() -> None:
         r,
         K32,
         free=(M8,),
-        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="result"), sweep=N16),),
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="result"), sweep=(N16,)),),
     )
 
     assert tuple(axis.name for axis in tile.place.free) == ("m", "n")
-    assert tile.output_specs[0].sweep is None
+    assert tile.output_specs[0].sweep == ()
+
+
+def test_sibling_output_sweeps_stay_sweeps() -> None:
+    """Two sibling output nests, each holding the contraction whose output coordinate it sweeps. Neither
+    axis is the kernel's shared output sweep — every store rides its own — so neither is promoted:
+    promoting one would evaluate the other nest per cell. DeepSeek-V4 post4096's residual root holds
+    four such nests, and promoting all seven of their axes made its grid their 2^56-cell product."""
+    p = Axis("p", 4)
+    second = _reduce_loop(
+        Load(name="left2", input="x", index=(Var("m"), Var("k"))),
+        Load(name="right2", input="u", index=(Var("p"), Var("k"))),
+        Assign(name="product2", op="multiply", args=("left2", "right2")),
+        Accum(name="acc2", value="product2", op="add", axes=("k",)),
+    )
+    body = (Assign(name="a", op="relu", args=("acc",)), Assign(name="b", op="relu", args=("acc2",)))
+    root = projection((_matmul(), second), body, ("a", "b"))
+    stores = (
+        OutputSpec(write=Write(output="out", index=(Var("m"), Var("n")), value="a"), sweep=(N16,)),
+        OutputSpec(write=Write(output="out2", index=(Var("m"), Var("p")), value="b"), sweep=(p,)),
+    )
+
+    tile = _tile(root, N16, p, K32, free=(M8,), output_specs=stores)
+
+    assert tuple(axis.name for axis in tile.place.free) == ("m",)
+    assert tuple(tuple(axis.name for axis in store.sweep) for store in tile.output_specs) == (("n",), ("p",))
 
 
 def test_nested_contraction_promotes_a_swept_column_beside_an_implicit_unit_row() -> None:
@@ -169,12 +194,12 @@ def test_nested_contraction_promotes_a_swept_column_beside_an_implicit_unit_row(
         r,
         K32,
         output_specs=(
-            OutputSpec(write=Write(output="out", index=(Literal(0, "int"), Literal(0, "int"), Var("n")), value="result"), sweep=N16),
+            OutputSpec(write=Write(output="out", index=(Literal(0, "int"), Literal(0, "int"), Var("n")), value="result"), sweep=(N16,)),
         ),
     )
 
     assert tuple(axis.name for axis in tile.place.free) == ("_um", "n")
-    assert tile.output_specs[0].sweep is None
+    assert tile.output_specs[0].sweep == ()
     assert any(site.node.as_contraction() is not None for site in sites(tile.op))
     assert TileOp(op=tile.op, place=tile.place, axes=tile.axes, output_specs=tile.output_specs).op is tile.op
 
@@ -204,7 +229,7 @@ def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -
     reconstructed = TileOp(op=tile.op, name=tile.name, place=tile.place, axes=tile.axes, output_specs=tile.output_specs)
 
     assert tuple(axis.name for axis in tile.place.free) == ("a0", "a1", "a6")
-    assert all(spec.sweep is None for spec in tile.output_specs)
+    assert all(spec.sweep == () for spec in tile.output_specs)
     assert reconstructed.op is tile.op
     # The authored seam — the score's K cone — is offered on the promoted tree.
     assert "PLACE@map.1/twist.1/inner.2/map" in {seam.spelling for seam in cuttable_seams(tile)}
@@ -367,7 +392,7 @@ def test_a_fold_reading_a_sweep_axis_declares_it_on_the_operand_edge() -> None:
         j,
         k,
         free=(M8,),
-        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("j")), value="v"), sweep=j),),
+        output_specs=(OutputSpec(write=Write(output="out", index=(Var("m"), Var("j")), value="v"), sweep=(j,)),),
     )
 
     assert not any(isinstance(stmt, Fold) for stmt in tile.op.lift.body)

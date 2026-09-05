@@ -12,15 +12,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
-from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
-from emmy.compiler.ir.tile.path import sites
 
 
 def _stamp_axes(loop: Loop) -> Loop:
@@ -348,62 +346,6 @@ def _renamed_sweep(loop: Loop, taken: set[str]) -> Loop:
     return replace(loop, axis=replace(loop.axis, name=fresh), body=Body(tuple(stmt.substitute(coords) for stmt in loop.body)))
 
 
-def _shared_output_axis(term: Fold, specs: tuple) -> tuple[Fold, tuple, frozenset[str]]:
-    """Map the sibling output sweeps a contraction is evaluated over onto ONE axis — the widest —
-    and return ``(term, specs, the axis names retired)``.
-
-    ``TileOp.__post_init__`` promotes such a sweep onto the placement's free axes, so the grid
-    parallelises the contraction under it; that promotion consumes the decision made here. One free
-    axis PER SWEEP would make the grid the cartesian product of the kernel's output widths, and a
-    kernel whose grid is a product enumerates every region once per cell of every other — the fused
-    q/k/v projection recomputing and rewriting q once per column of the k/v axis, the NVFP4
-    post-attention re-encode asking for a 2^31-point launch off outputs 2048, 256 and 4096 wide.
-    One shared axis is one enumeration, and the contraction under each region still finds an
-    ``(m, n)`` pair on the grid, so the tensor-core tier survives.
-
-    A narrower region rides the shared axis's first cells: its reads CLAMP (σ maps its coordinate to
-    ``host % extent``, so an overhanging cell recomputes a valid row instead of reading past its
-    operand) and its stores carry that extent as an ``OutputSpec.guard``. Sweeps of equal extent
-    need neither — they are the same cell — so they merge by rename alone. The decision is made
-    here, at formation, because ``TileOp.__post_init__`` cannot rewrite the term: the tile is
-    already a node of the graph by then, and the exception a rewrite raises there is read as a
-    fusion refusal, which unfuses the very kernel this keeps whole.
-    """
-    contractions = tuple(site.node for site in sites(term) if site.node.as_contraction() is not None)
-    promoted = {
-        spec.sweep.name: spec.sweep
-        for spec in specs
-        if spec.sweep is not None and any(spec.sweep.name in edge.free_axes for con in contractions for edge in con.operands)
-    }
-    if len(promoted) < 2 or not all(axis.extent.is_static for axis in promoted.values()):
-        return term, specs, frozenset()
-    host = max(promoted.values(), key=lambda axis: axis.extent.as_static())
-    width = host.extent.as_static()
-    narrow = {name: axis.extent.as_static() for name, axis in promoted.items() if name != host.name}
-    coords = Sigma(
-        {
-            name: Var(host.name) if extent == width else BinaryExpr("%", Var(host.name), Literal(extent, "int"))
-            for name, extent in narrow.items()
-        }
-    )
-    term = rewrite(term, lambda name: name, coords)
-    onto = dict.fromkeys(narrow, host.name)
-    specs = tuple(
-        replace(
-            spec,
-            # Under the guard the shared coordinate IS the region's own, so the store index takes it
-            # unclamped — a dense output column the store geometry can still read as one.
-            write=spec.write.rename(onto),
-            sweep=host,
-            guard=None if narrow[spec.sweep.name] == width else (host.name, narrow[spec.sweep.name]),
-        )
-        if spec.sweep is not None and spec.sweep.name in narrow
-        else spec
-        for spec in specs
-    )
-    return term, specs, frozenset(narrow)
-
-
 def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     """Lift one statement tree into ``(operand terms, statements)`` — SEPARATED, bottom up.
 
@@ -454,7 +396,11 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
             edges.extend(inner)
             level.exposed.update((name, fold) for fold in inner for name in fold.exposes)
             writes = tuple(member for member in cell if isinstance(member, Write))
-            pure = Body(tuple(member for member in cell if not isinstance(member, Write)))
+            # A NESTED output sweep is a statement of this cell, not projection material: its own
+            # recursion already reduced it to its stores, so it stays in the retained cell — at
+            # its source position among the writes — while the projection term is formed from the
+            # pure members alone.
+            pure = Body(tuple(member for member in cell if not isinstance(member, (Write, Loop))))
             defined = {name for member in pure for name in member.defines()}
             results = tuple(dict.fromkeys(value for write in writes for value in write.values if value in defined))
             if results:
@@ -462,7 +408,7 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
                 term = Fold(operands=operands, lift=lift)
                 edges.append(term)
                 level.exposed.update((name, term) for name in term.exposes)
-                cell = Body(writes)
+                cell = Body(tuple(member for member in cell if isinstance(member, (Write, Loop))))
             level.stmts.append(replace(stmt, body=cell))
             continue
         nested = stmt.nested()
@@ -488,6 +434,40 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     return remaining, Body(kept)
 
 
+def _combine_from_merge(body: Body, accums: tuple[Accum, ...], temps: frozenset[int]) -> tuple[Lambda, tuple[str, ...]]:
+    """The stored ⊕ recovered from the statements ``Fold.merge`` emitted, and the injection it
+    folds — the inverse of that method.
+
+    A merge lowers every rescale temp to an ordinary statement and each state component to an
+    ``Accum`` reading it (``name = op(base, value)``, ``base`` absent for the ordinary self-fold).
+    Read back, those statements ARE the combine: the temps verbatim and each ``Accum`` as the
+    assignment it folds, in original program order — a combine is not SSA in its states, so a temp
+    standing between two component updates reads whichever value is current there.
+
+    The injection is what the combine reads and does not itself define. It is NOT the ``Accum``'s
+    ``value``: a twisted merge rescales the incoming side first, so that operand names the rescale
+    (``acc__blk · β``), not the component. Returned in first-read order and bound as the combine's
+    second operand positionally, which is the contract ``Fold.merge`` re-applies at ``lift.results``.
+    """
+    states = tuple(stmt.name for stmt in accums)
+    own = {id(stmt) for stmt in accums} | temps
+    defined = {name for stmt in body if id(stmt) in own for name in stmt.defines()}
+    stmts: list[Stmt] = []
+    other: list[str] = []
+    for stmt in body:
+        if id(stmt) not in own:
+            continue
+        for name in Body((stmt,)).ssa_uses:
+            if name not in defined and name not in other:
+                other.append(name)
+        if isinstance(stmt, Accum):
+            left = stmt.name if stmt.base is None else stmt.base
+            stmts.append(Assign(name=stmt.name, op=stmt.op, args=(left, stmt.value)))
+        else:
+            stmts.append(stmt)
+    return Lambda(params=(*states, *other), body=Body(tuple(stmts)), results=states), tuple(other)
+
+
 def fold_from_loop(loop: Loop) -> Fold:
     """Lift one PURE reduction from its explicit ``Accum`` statements."""
     fold, trailing = scan_from_loop(loop)
@@ -509,14 +489,26 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     accums = tuple(stmt for stmt in body if isinstance(stmt, Accum))
     if not accums:
         raise ValueError(f"reduce loop {loop.axis.name!r} has no Accum")
-    if any(stmt.base is not None or stmt.dtype is not None for stmt in accums):
+    if any(stmt.dtype is not None for stmt in accums):
         raise ValueError(f"reduce loop {loop.axis.name!r} is not in canonical Loop IR")
     writes = tuple(stmt for stmt in body if isinstance(stmt, Write))
     write_ids = {id(stmt) for stmt in writes}
+    # A TWISTED carrier's rescale reads the carried state, so those statements are the COMBINE's,
+    # not the lift's — the one discrimination that tells the two halves of a merge apart. Program
+    # order plus SSA makes a single forward pass the whole closure.
+    carried = {stmt.name for stmt in accums}
+    combine_temps: set[int] = set()
+    for stmt in body:
+        if isinstance(stmt, Accum) or id(stmt) in write_ids or not (Body((stmt,)).ssa_uses & carried):
+            continue
+        carried |= set(stmt.defines())
+        combine_temps.add(id(stmt))
+    if any(id(stmt) in combine_temps for stmt in body if isinstance(stmt, Load)):
+        raise ValueError(f"reduce loop {loop.axis.name!r}: a rescale that reads memory is not a stored combine")
     # Already separated by :func:`lift_body` — ``edges`` are the step's nested reductions, ``plain``
     # its statements. ``Fold.lower`` places each edge ahead of its reader, so the split preserves
     # evaluation order without the step ever having been a mixed sequence.
-    step = tuple(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids)
+    step = tuple(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids and id(stmt) not in combine_temps)
     # Every ``Load`` in the step becomes a SLAB — a term declaring the coordinates it indexes —
     # and a semiring step's product ARGUMENTS become operand edges too (:func:`_factor_products`):
     # a chain the step computes ahead of a product is a zero-axis cone. That is what makes a
@@ -529,7 +521,15 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     gathers = {id(stmt) for stmt in step if isinstance(stmt, Load) and any(expr.free_vars() & defined for expr in stmt.index)}
     slabs = tuple(Fold.slab(stmt) for stmt in step if isinstance(stmt, Load) and id(stmt) not in gathers)
     plain = Body(stmt for stmt in step if not isinstance(stmt, Load) or id(stmt) in gathers)
-    values, ops = tuple(stmt.value for stmt in accums), tuple(stmt.op for stmt in accums)
+    ops = tuple(stmt.op for stmt in accums)
+    # A PLANAR fold folds the injected value itself, so the ``Accum``'s ``value`` IS the lift's
+    # result and the combine is the componentwise program — read back byte-identically to what it
+    # lowered from. A twisted one folds a rescale of it, so both halves come off the merge.
+    planar = not combine_temps and all(stmt.base is None for stmt in accums)
+    if planar:
+        combine, values = None, tuple(stmt.value for stmt in accums)
+    else:
+        combine, values = _combine_from_merge(body, accums, frozenset(combine_temps))
     edges, plain, hoists = _factor_products(plain, values, ops, (*edges, *slabs), scope, levels, axes, hoist=not writes)
     names = tuple(stmt.name for stmt in accums)
     # FORM the lift closed: a value the step reads from an enclosing level arrives as an operand;
@@ -538,7 +538,11 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     edges, lift = _close((loop.axis.name,), edges, plain, values, axes, levels)
     if not all(op.has_identity for op in ops):
         raise ValueError(f"reduce loop {loop.axis.name!r}: an Accum op without an identity is not a monoid ⊕")
-    init, combine = tuple(op.identity for op in ops), Lambda.componentwise(ops, names)
+    # The seed is the ⊕'s identity either way — the form a merge lowers to, and what the identity
+    # placement emits.
+    init = tuple(op.identity for op in ops)
+    if combine is None:
+        combine = Lambda.componentwise(ops, names)
     if not writes:
         fold = Fold(operands=edges, lift=lift, init=init, combine=combine)
         return (_hoisted(fold, names, hoists, axes, levels) if hoists else fold), ()
@@ -618,18 +622,12 @@ def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
     # projection normalization dissolves, rather than a permanent layer over every bare kernel.
     results = _root_results(Body(body)) or tuple(dict.fromkeys(value for spec in output_specs for value in spec.write.values))
     edges, lift = _close((), edges, Body(body), results, tuple(free), ())
-    # Sibling output regions of different widths ride ONE grid axis, so the kernel enumerates its
-    # output cells once (:func:`_shared_output_axis`) — decided here, on the term, before the tile
-    # that promotes it exists.
-    term, output_specs, retired = _shared_output_axis(Fold(operands=edges, lift=lift), output_specs)
     # The kernel's axis table: the free axes and every loop the nest bound (reduce, sweep), by
     # name — the term names them, the kernel holds their extents.
     axes = {axis.name: axis for axis in (*free, *(loop.axis for loop in Body.coerce(cell).loops))}
-    axes.update((spec.sweep.name, spec.sweep) for spec in output_specs if spec.sweep is not None)  # a renamed sibling sweep
-    for name_ in retired - {spec.sweep.name for spec in output_specs if spec.sweep is not None}:
-        axes.pop(name_, None)  # a sweep merged onto the shared axis is no coordinate of this kernel
+    axes.update((axis.name, axis) for spec in output_specs for axis in spec.sweep)  # a renamed sibling sweep
     return TileOp(
-        op=term,
+        op=Fold(operands=edges, lift=lift),
         name=name,
         place=Placement(free=tuple(free)),
         axes=tuple(axes.values()),

@@ -179,34 +179,48 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    disqualifications, and no online prior was written. The monotone serial-work prior feature remains the
    cold-start answer. NOTE: the host's tune DB now carries those 9 rows, so any unpinned compile there elects the
    partitioned route — intended, now that #700 makes it build.
-3. **Price the recomputation so the statistics piece gets elected — LANDED (#702), and the elected statistics
-   piece measures 8.6 ms on the host.** Even the elected 2³⁰ route ran past the 60 s bench watchdog
+3. **Price the recomputation so the statistics piece gets elected — LANDED (#702), then the clamp REVERTED by
+   review decision; the statistics piece elected under it measured 8.6 ms on the host.** Even the elected 2³⁰ route
+   ran past the 60 s bench watchdog
    per launch: the dominant cost was re-evaluating the mHC statistics subtree 16,384× (4096 carrier positions × 4
    streams) inside the consumer piece's sum-of-squares reduce. Characterized GPU-free: the materializing seam
    (`PLACE@a8`, the gate's fn-projection) was OFFERED and priced away — the offline cold-start proxy gave the
    fused 2³⁰-trip nest 4.29e-37 µs against the cut arm's 1.02e-17, with zero weights on any structural feature.
-   The landed fix is pricing: the nest-aware `S_ext_serial_cell_work` stamp, the coverage-adjusted
-   `D_serial_cell_work` feature, and a guarded clamp at the kernel-set Σ (`policy/greedy._resolved_price`) — a
-   kernel whose serial-work lower bound exceeds 1 ms prices at least that bound; below the guard elections stand
-   untouched, so a future recomputation nest under ~2²³ per-thread trips is still adjudicated by the uncalibrated
-   proxy. (Plus: disqualification signatures survive featurizer vocabulary growth — the stamp alone had silenced
-   the host DB's 9 `bench_fail` rows — and `SearchDB` schema v4 drops stale `lowering` chains keyed pre-stamp.)
-   Replayed on the pinned twins + host-DB copy, the greedy elects the same 12-piece plan plus exactly the
-   `PLACE@a8` statistics piece — 13 kernels, the consumer drops 2³⁰ → 2¹⁶ and the route's worst piece is 2¹⁹
+   #702 answered with pricing: the nest-aware `S_ext_serial_cell_work` stamp, the `D_serial_cell_work` fit signal,
+   and a guarded clamp at the kernel-set Σ that priced a kernel at least its serial-work lower bound past 1 ms.
+   The clamp was reverted on review: a lower bound on the prior's estimate is not how the deploy path elects —
+   the prior must not decide a production election at all, and where it does, the missing golden or measured row
+   is the defect. The stamp and fit signal stay (the prior can learn serial work), as do the two fixes that rode
+   the same PR: disqualification signatures survive featurizer vocabulary growth (the stamp alone had silenced
+   the host DB's 9 `bench_fail` rows) and `SearchDB` schema v4 dropping stale `lowering` chains keyed pre-stamp.
+   Under the clamp, replayed on the pinned twins + host-DB copy, the greedy elected the same 12-piece plan plus
+   exactly the `PLACE@a8` statistics piece — 13 kernels, the consumer drops 2³⁰ → 2¹⁶ and the route's worst piece is 2¹⁹
    per-thread trips (the unaided fused monster was 2³⁸).
-4. **Make the elected pieces fast — OPEN, the current critical path (measured on the host 2026-09-02).** The
-   elected route was benched completely for the first time (every earlier attempt died on the 60 s watchdog; the
-   clean run needed `--warmup 3 --iters 10` plus `EMMY_BENCH_RUN_TIMEOUT_S` — a third budget knob beside the two
-   the tune report named): the live election reproduces the replay exactly (13 kernels, deterministic resolve in
-   284 s) and the whole `post4096` forward measures **23.24 s** — not servable, so gate (c) was not attempted.
-   The statistics piece itself costs 8.6 ms; the cost moved. One piece (`__place_8a9a1fe058`, 13.2 s, 57 %) runs
-   eight serial 4096-trip hidden-dim reductions per thread with two stride-2048 fp16 weight-column walks per trip
-   — an uncoalesced re-read of both FFN weight matrices per output element, at 25 % occupancy — and two
-   16384-grid sweep pieces add 9.3 s; everything else totals ~0.7 s. #702's bound elected the best plan on the
-   ballot (five orders of magnitude past the fused monster); the ballot holds no fast lowering for these pieces
-   yet. Two moves, in order: a measured tune pass over the dominant pieces with the raised bench budgets (also
-   the measured-election evidence gap 2 always wanted), and — if the fork space has no fast row — materializing
-   the matmul contributions as their own mma pieces, the way `PLACE@a8` materialized the statistics.
+4. **Make the elected pieces fast — OPEN; the path is now recorded goldens, not pricing.** Measured on the host
+   2026-09-02: the elected route benched completely for the first time (every earlier attempt died on the 60 s
+   watchdog; the clean run needed `--warmup 3 --iters 10` plus `EMMY_BENCH_RUN_TIMEOUT_S` — a third budget knob
+   beside the two the tune report named) — 13 kernels, and the whole `post4096` forward **23.24 s**, not
+   servable, so gate (c) was not attempted. One piece (`__place_8a9a1fe058`, 13.2 s, 57 %) re-read both FFN
+   weight matrices per output element through serial 4096-trip hidden-dim reductions, and two 16384-grid sweep
+   pieces added 9.3 s. A measured tune pass (2026-09-03, three passes, 58 ok rows) found no faster row for those
+   pieces — every arm hung the watchdog — so the round turned to materializing the matmul contributions.
+   What stands from that round (all GPU-free, pinned twins + host-DB copy): **(a)** the (A) verdict — the
+   contribution seams (`PLACE@a29`, the linear_2/linear_3 contraction; `PLACE` on the activation cone) and the
+   mHC statistics seams are ON the ballot and realize; seam capability is not the gap, and the uncalibrated
+   proxy should not be the decider. **(b)** the materialized shape is right: a route whose contribution
+   consumer is a pure staged mma with no serial hidden-dim walk, the walk living once in a producer piece, and
+   the statistics computed once per row. **(c)** two blockers characterized on post-#699 main, each its own
+   item: the residual root's output sweeps were all promoted into its placement (the emitted kernel decoded a
+   2^56-thread linear grid — un-launchable) — FIXED by #723 (only the kernel's shared output sweep promotes; a
+   sibling output nest's axis stays a sweep, and the residual launches at its 4096-row grid, 16 blocks × 256
+   threads, again), and the contribution producer still recomputes the carrier chain
+   per (row, a28) cell (the next seam, `PLACE@…inner` on the `a32` contraction, is on its ballot). Pricing
+   floors beyond #702's are OUT by review decision: a golden must carry every kernel of the route, and strict
+   evidence then keeps the prior from deciding at all. The path to serving: make `emmy tune` able to measure
+   this family — the tune dead-end sink (#705), the retry-policy and regime-pin fixes in flight, the bench
+   budget knobs, and a flag to seed the deploy election's route as a measured proposal — then tune the serving
+   twins on the host, record the golden, and boot under strict evidence. The host measurement of any route
+   remains owed.
 
 **Consequence for the stages below.** Gate (c) passed at `ab1ad4592` and still does not reproduce: a boot now
 compiles end to end and the elected route is a measured 23.2 s per `post4096` prefill forward (no longer a

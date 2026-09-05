@@ -69,7 +69,7 @@ def test_matmul_cell_lifts_and_canonicalizes_as_contraction() -> None:
     assert isinstance(node, Fold) and node.axis is not None
     assert node.as_contraction() is not None
     assert [edge.as_slab().load.input for edge in node.operands] == ["x", "w"]
-    assert len(tile.output_specs) == 1 and tile.output_specs[0].sweep is None
+    assert len(tile.output_specs) == 1 and tile.output_specs[0].sweep == ()
 
 
 def test_epilogue_stays_in_the_projection_body() -> None:
@@ -199,7 +199,7 @@ def test_singleton_reduce_over_an_enclosing_value_lifts_as_a_projection() -> Non
 
 
 def test_sibling_q_and_kv_regions_total_lift_with_separate_outputs() -> None:
-    """A shared row feeding different Q and K/V extents remains one pure TileOp, on ONE output axis."""
+    """A shared row feeding different Q and K/V extents remains one pure TileOp."""
     m, q, kv, k = Axis("m", 3), Axis("q", 4), Axis("kv", 2), Axis("k", 5)
 
     def contraction(axis: Axis, weight: str, acc: str) -> Loop:
@@ -241,26 +241,20 @@ def test_sibling_q_and_kv_regions_total_lift_with_separate_outputs() -> None:
 
     # The root projection has nothing of its own: its operands are the q contraction and the k/v
     # pair normalization merged over their shared row; the writes are boundary specs. Each output
-    # loop's axis is a contraction output, so post-init promotes it onto the grid like any
-    # contraction sweep, and the kernel-scope program is flat.
+    # loop's axis is a contraction output, but neither is the kernel's SHARED output sweep — the q
+    # store does not ride kv, nor the k/v stores q — so post-init leaves both as sweeps: promoting
+    # one would evaluate the other region once per cell of it. The row alone is on the grid.
     assert tile.op.axis is None and not tile.op.lift.body
     assert [(edge.as_contraction() is not None, len(edge.exposes)) for edge in tile.op.operands] == [(True, 1), (True, 2)]
-    # ONE output axis, the widest. A second free axis for the narrower region would make the grid
-    # the product of the two output widths and re-enumerate each region over the other's cells.
-    assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
-    assert all(spec.sweep is None for spec in tile.output_specs) and len(tile.output_specs) == 3
-    # The k/v region rides the shared axis's first two cells, so its stores carry that bound; q
-    # spans the axis and carries none.
-    assert {spec.write.output: spec.guard for spec in tile.output_specs} == {"q_out": None, "k_out": ("a1", 2), "v_out": ("a1", 2)}
-    # The closed program is ONE nest over the shared axis: both regions are evaluated over it, the
-    # narrow one clamp-reading its weights (``% 2``) on the cells past its own extent.
-    (n_loop,) = tile.loop_body
-    (m_loop,) = n_loop.body
-    assert (n_loop.axis.extent, m_loop.axis.extent) == (Dim(4), Dim(3))
-    assert {write.output for write in m_loop.body.writes} == {"q_out", "k_out", "v_out"}
-    assert any("% 2" in load.index[0].pretty() for load in m_loop.body.iter_of_type(Load))
+    assert [axis.extent for axis in tile.place.free] == [Dim(3)]
+    assert [tuple(axis.extent for axis in spec.sweep) for spec in tile.output_specs] == [(Dim(4),), (Dim(2),), (Dim(2),)]
+    # The closed program opens the two sweeps as SIBLING loops under the row: no term is evaluated
+    # over both, so neither nests in the other.
+    (m_loop,) = tile.loop_body
+    assert {loop.axis.extent for loop in m_loop.body} == {Dim(2), Dim(4)} and len(m_loop.body) == 2, "sibling sweeps, not a chain"
+    assert {write.output for loop in m_loop.body for write in loop.body.writes} == {"q_out", "k_out", "v_out"}
     seam_scopes = {frozenset(axis.extent for axis in seam.axes) for seam in cuttable_seams(tile)}
-    assert seam_scopes == {frozenset((Dim(3), Dim(4)))}
+    assert {frozenset((Dim(3), Dim(4))), frozenset((Dim(3), Dim(2)))} <= seam_scopes
 
 
 def test_an_output_sweeps_epilogue_lifts_to_a_term_declaring_the_sweep_axis() -> None:
@@ -299,7 +293,7 @@ def test_an_output_sweeps_epilogue_lifts_to_a_term_declaring_the_sweep_axis() ->
     assert Dim(4) in {axis.extent for axis in tile.axes if axis.name in epilogue.free_axes}
     assert [axis.extent for axis in tile.place.free] == [Dim(3), Dim(4)]
     (spec,) = tile.output_specs
-    assert spec.write.values == epilogue.exposes and spec.sweep is None
+    assert spec.write.values == epilogue.exposes and spec.sweep == ()
     assert [type(stmt).__name__ for stmt in tile.op.lower(_grid(tile), tile.output_specs, tile.axes)] == ["Loop", "Load", "Assign", "Write"]
 
 

@@ -253,7 +253,7 @@ def _peeled_root(edge, ctx: Ctx):
 
 def _swept_axis(root, specs: tuple) -> str | None:
     """The output sweep axis ``root``'s cone reads, or ``None``."""
-    return next((spec.sweep.name for spec in specs if spec.sweep is not None and spec.sweep.name in root.free_axes), None)
+    return next((axis.name for spec in specs for axis in spec.sweep if axis.name in root.free_axes), None)
 
 
 def _refuse_partitioned_sweep(root, ctx: Ctx, axis: str) -> None:
@@ -376,9 +376,12 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
     # whole grid rides untiled.
     folded = scheduled_fold_contraction(op, ctx.sched) if isinstance(op, Fold) and op.axis is not None else None
     if folded is not None:
-        c, value_child, tile, stage = folded
-        projection = tail
-        tail = fold_store_tail(tail, op, c)
+        # A BLOCKED carrier whose bilinear channel took a staged warp tile: that channel's tile is
+        # the kernel's output tiling and the block loop is its staged K loop, so the node bound
+        # here is the channel and the carrier rides it as the per-block program.
+        value_child, tile, stage = folded
+        c, projection = value_child, tail
+        tail = fold_store_tail(tail, op, value_child)
     else:
         c, value_child, projection = op, None, ()
         tile = ctx.sched.tile_of(op) if isinstance(op, Fold) and op.as_contraction() is not None else None
@@ -565,18 +568,19 @@ def _mask_streamed(body: list[Stmt], axis: str, offset: int, extent, stream_iden
 
 
 def _replicate(
-    body: Body, r: int, coop: int, axis: Axis, masked: bool, protected: frozenset[str], stream_identity: tuple[str, float] | None = None
+    body: Body, r: int, span: int, axis: Axis, masked: bool, protected: frozenset[str], stream_identity: tuple[str, float] | None = None
 ) -> list[Stmt]:
     """Copy ``r`` of the reduce body for the REG (ILP) fold. Copy 0 is the body verbatim.
     Copy ``r > 0`` suffixes every per-copy SSA name with ``__r{r}`` (its accumulator + temps
     are an independent chain) — EXCEPT the shared iteration coordinates in ``protected`` (the
     grid / reduce / lane axis vars, common to all copies) — and offsets its streamed reads by
-    ``r·coop`` (σ on the reduce axis). A ``masked`` copy wraps the read in-bounds (``% extent``)
-    and clamps the tail contribution to a no-op (:func:`_mask_streamed`; ``stream_identity``
-    selects the twisted-carrier form)."""
+    ``r·span``, where ``span`` is the COORDINATE distance one lane sweep covers: ``coop``
+    iterations of the axis's own :attr:`Axis.step` (σ on the reduce axis). A ``masked`` copy wraps
+    the read in-bounds (``% extent``) and clamps the tail contribution to a no-op
+    (:func:`_mask_streamed`; ``stream_identity`` selects the twisted-carrier form)."""
     if r == 0:
         return list(body)
-    offset = r * coop
+    offset = r * span
     shifted = BinaryExpr("+", Var(axis.name), Literal(offset, "int"))
     index_expr = BinaryExpr("%", shifted, axis.extent_expr()) if masked else shifted
     sigma = Sigma({axis.name: index_expr})
@@ -786,9 +790,13 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     coop, reg = plan.coop, plan.reg
     view = op.as_reduction()
     axis = rloop.axis
-    stride = coop * reg
-    masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
-    start = Var(lane.name) if lane is not None else Literal(0, "int")
+    # A STRIDED axis walks its extent one BLOCK at a time, so the partition is over its trips, not
+    # over its coordinates: every span below is an iteration count times the axis's own step.
+    step = axis.step.value if isinstance(axis.step, Literal) else 1
+    trips = axis.trips
+    stride = coop * reg * step
+    masked = reg > 1 and not (trips is not None and trips % (coop * reg) == 0)
+    start = Literal(0, "int") if lane is None else BinaryExpr("*", Var(lane.name), Literal(step, "int")) if step > 1 else Var(lane.name)
 
     # The reduce loop: ``reg`` interleaved accumulator chains (ILP), striding the axis by
     # ``coop·reg`` from the lane's start. The dissolved fold ``Accum``\\ s seed each copy's
@@ -823,7 +831,7 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     stream_identity = (str(view.terms[0]), ElementwiseImpl("maximum").identity) if view.twisted else None
     copies: list[Stmt] = []
     for r in range(reg):
-        copies.extend(_replicate(rloop.body, r, coop, axis, masked, protected, stream_identity))
+        copies.extend(_replicate(rloop.body, r, coop * step, axis, masked, protected, stream_identity))
     strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
 
     # The carrier-driven partial merge: the REG-tree fold of the ``reg`` ILP copies into the survivor

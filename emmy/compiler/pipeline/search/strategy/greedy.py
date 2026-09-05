@@ -37,10 +37,10 @@ class GreedyStrategy(SearchStrategy):
     * **Validity fallback** — the prior can rank a tile that fails ``validate(ctx)`` first;
       greedy benches nothing, so an un-lowered node blocklists its tile and re-resolves onto the
       next prior-ranked leaf. Bounded retries (each adds ≥1 block or stops).
-    * **Structural retirement** — a resolution that took a structural pick gets one coarser
-      fallback first: any lowering failure retires structural picks wholesale
-      (``price_structural=False``), since a fragment kernel's failure can't be blocklisted at
-      the fork site (the splice minted fresh node ids).
+    * **Structural retirement** — a fragment kernel's refused row blocklists at the piece's own
+      schedule fork (its node id is stable across re-resolves), so the composed route replays
+      while the piece re-ranks; only once no row of the piece binds are structural picks retired
+      wholesale (``price_structural=False``) — a fragment can't be blocklisted at the fork site.
     * **Prior-off re-resolve** — when the blocklist budget exhausts, one final resolve without
       the prior (emission-order pick) drops the extrapolation that overflowed; the recorded
       goldens still floor it and ``blocked`` rides along.
@@ -82,22 +82,23 @@ class GreedyStrategy(SearchStrategy):
             failed = _unlowered_tiles(terminal, rejections, lowers_to_cuda=complete)
             if not failed:
                 break
-            if allow_structural and any(d.chosen_kind == "graph" for d in trace):
-                # Say so: the keep-fused re-resolve is correct but slower, and a silent retirement
-                # leaves a deploy on a kernel set with nothing in the log to explain it.
-                logger.warning(
-                    "compile: the priced kernel-set change left %s un-lowered (%s) — retiring structural picks and "
-                    "re-resolving down the keep-fused branch",
-                    ", ".join(repr(nid) for nid in failed),
-                    "; ".join(reason for _nid, _label, reason in rejections) or "no rule recorded a decline",
-                )
-                allow_structural = False
-                continue
             new = {nid: ident for nid, ident in failed.items() if ident not in blocked.get(nid, set())}
-            if not new:  # no fresh info to retry on → report below
+            if new:  # a refused row re-ranks its own piece; every other pick replays
+                for nid, ident in new.items():
+                    blocked.setdefault(nid, set()).add(ident)
+                continue
+            # A re-pick of a blocked row: nothing of the piece binds → revisit a structural pick, once.
+            if not (allow_structural and any(d.chosen_kind == "graph" for d in trace)):
                 break
-            for nid, ident in new.items():
-                blocked.setdefault(nid, set()).add(ident)
+            # Say so: the keep-fused re-resolve is correct but slower, and a silent retirement
+            # leaves a deploy on a kernel set with nothing in the log to explain it.
+            logger.warning(
+                "compile: the priced kernel-set change left %s un-lowered (%s) — retiring structural picks and "
+                "re-resolving down the keep-fused branch",
+                ", ".join(repr(nid) for nid in failed),
+                "; ".join(reason for _nid, _label, reason in rejections) or "no rule recorded a decline",
+            )
+            allow_structural = False
         # The prior-ranked tiles all overflowed ``validate(ctx)`` within the retry budget — an
         # *online* prior can extrapolate a large tile onto a small shape, and the blocklist
         # retry exhausts before reaching an in-budget leaf. Re-resolve WITHOUT the prior (the

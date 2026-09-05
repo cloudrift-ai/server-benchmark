@@ -124,9 +124,12 @@ rule matches a `LoopOp` and returns several tile options.
    exceeds the cold-pool budget is ranked over a deterministic drawn subset (seeded uniform descents through the
    lazy tree — legal complete rows, every level covered) instead of walked at full length: the cold pick needs a
    reasonable kernel, and the optimal one comes from measured evidence, which descends directly whatever the pool
-   size. Drawing has a hard option-check budget while one descent fits inside it. If one complete descent's declared
-   bound is already larger, exactly one descent attempt is the soft-cap exception; an empty sample fails rather than
-   walking the full pool or substituting a partial branch. Under strict evidence this step is never reached: the
+   size. The seed is the pool's schedule-space stamp, which spells the precision gates by effect (Part 6's pool
+   identity), so a compile under a golden's published `FAST_MATH: false` regime draws the subset the unpinned
+   deploy draws and makes the same cold pick. Drawing has a hard option-check budget while one descent fits
+   inside it. If one complete descent's declared bound is already larger, exactly one descent attempt is the
+   soft-cap exception; an empty sample fails rather than walking the full pool or substituting a partial
+   branch. Under strict evidence this step is never reached: the
    compile raises `EvidenceError` for the kernel instead.
 7. Ties at every step break by `knob.canonical_row_key`, never by the order the rule emitted its options in.
 8. The winning leaf is built for real. The µs of whichever row decided it is written onto the fork's
@@ -416,18 +419,11 @@ is reached only by pointing `EMMY_OFFLINE_FILE` (or `--offline-file`) at it. Eac
 `provenance.scope`; read that before drawing conclusions from one, because a scoped artifact has no reason to beat
 the shipped weights outside the slice it was fit on.
 
-The proxy stays uncalibrated, and the one consumer that needs absolute µs enforces a physical bound instead: in
-the kernel-set Σ (`policy/greedy._resolved_price`), a summand whose serial-work lower bound
-(`features.serial_floor_us` — the row's per-thread serial trips, i.e. the nest-aware `S_ext_serial_cell_work`
-stamp after its reduce-partition coverage, at a per-trip constant conservative for any GPU clock) exceeds the
-enforcement guard (`_SERIAL_FLOOR_ENFORCE_US`, 1 ms) is clamped to that bound. No fitted weight can guarantee the bound at magnitudes no measurement
-can reach: DeepSeek-V4 `post4096`'s fused 2^30-trip recomputation nest priced 4.29e-37 µs and beat every
-recomputation-free composed-cut arm until the bound priced it honestly. The guard is jurisdiction, not tuning —
-the bound ignores launch overhead and memory traffic, so at ordinary magnitudes the model's ranking stands
-untouched, while a bound past the guard is un-servable whatever those effects are. A measured µs is never below
-the bound, so the clamp only ever lifts model garbage; the prior's own scoring surfaces are untouched, because
-any µs bound there collapses live-range sibling deltas — the plateau failure `latency_proxy`'s history warns
-about. (`D_serial_cell_work`, the same quantity log-scaled, rides the featurization as an ordinary fit signal.)
+The proxy stays uncalibrated, and nothing in the deploy path corrects it by hand: the kernel-set Σ
+(`policy/greedy._resolved_price`) sums each row's own price as stamped or estimated. Where the prior ends up deciding
+a production election, the defect is the missing evidence — no recorded golden or measured row for that kernel —
+and the fix is to record it, not to bound the estimate. (`D_serial_cell_work`, the stamped per-thread serial work
+log-scaled, rides the featurization as an ordinary fit signal.)
 
 What a newcomer needs to know about the fit:
 
@@ -685,7 +681,7 @@ offers, or a schedule row no kernel of the replay enumerates, is stale and is no
 realizes is the question the nightly `onboard-model` workflow asks with the strict decode (`golden.decode_record`),
 over the same replay: the persisted program must select exactly one kernel (a receipt selects its child by stored
 identity), a routing record's every cut key must name a seam the cut pass offers, and a schedule row must equal one
-enumerated leaf under the record's own pins. The per-commit tests do not load checked-in goldens because proving a
+enumerated leaf under the record's own pins. The default test suite does not load checked-in goldens because proving a
 row enumerates its whole fork costs record count times fork size.
 
 **Whether goldens are training data differs between the two halves of the prior.** The **online** prior never trains
@@ -836,9 +832,9 @@ different kernel families, and that is a fitting requirement on the prior. When 
 the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking
 (`_priced_pick`, the flat-list form kept for exactly these corners). **No leaf is
 withheld to keep a kernel set unchanged.** The one thing that does withdraw the splices is `price_structural=False`,
-which is not about speed: it is how `GreedyStrategy` retires a structural pick whose fragment kernel failed to LOWER
-(the splice minted fresh node ids, so it cannot be blocklisted at the fork site), and how a nested price probe
-avoids re-splitting the slice it is pricing.
+which is not about speed: it is how `GreedyStrategy` retires a structural pick once no row of a fragment kernel binds
+(a fragment's failure cannot be blocklisted at the structural fork site), and how a nested price probe avoids
+re-splitting the slice it is pricing.
 
 **Evidence joins tolerate stamps a row predates, and nothing else.** `Prior.sig_groups` is one contract for the
 reservoir, the evidence index (tune DB rows and golden rows alike) and the disqualification tier: a row describes a
@@ -854,8 +850,8 @@ the deploy's own context key — one regime, one key, one lane — and the pick 
 matching measured rows.
 
 **Retries are decide-wrappers over a deterministic re-resolve** — every other choice replays identically (cheap
-non-chronological backtracking, no snapshots). A structural pick that leaves a fragment kernel un-lowered retires
-structural picks wholesale and re-resolves the keep-fused branch before falling back to tile blocklisting.
+non-chronological backtracking, no snapshots). A fragment kernel's refused row blocklists at that piece's own schedule
+fork, so the composed route replays while the piece re-ranks; only once no row of it binds are structural picks retired.
 
 **Greedy validity fallback.** The whole greedy retry orchestration is search policy, owned by
 `policy/greedy.GreedyStrategy` — `Pipeline.run` is a thin entry point delegating to it. The prior ranks by

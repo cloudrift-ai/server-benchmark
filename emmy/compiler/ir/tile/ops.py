@@ -297,9 +297,11 @@ class Sched:
           the same reading the scheduler binds through at option assembly);
         - a derived unit-axis contraction inherits its parent Fold's reduction domain, so its
           result tiles the placement's trailing free pair;
-        - any other nested contraction takes the free m axis and its PARENT fold's axis as n —
+        - any other nested contraction takes the free m axis and its nearest ENCLOSING fold's axis as n —
           read through a slice partial's window PARENT, so the view carries the pre-slice geometry
-          the fragment clamps were built against.
+          the fragment clamps were built against. A BLOCK window is the exception, and the reason
+          blocking exists: the enclosing fold walks one block at a time, so the block's OWN extent
+          is the n the fragment is sized against, not the stream it was carved from.
         """
         free = tuple(self.place.free)
         site = self.site_of(node)
@@ -326,11 +328,22 @@ class Sched:
             return orient(self.place.root_mn)
         if len(free) < 2:
             return None
-        parent = next((s for s in self._all_sites() if s.hops == site.hops[:-1]), None)
-        ax = self.axis_of(parent.node.axis) if parent is not None and getattr(parent.node, "axis", None) is not None else None
+        # The nearest ENCLOSING fold, through any zero-axis projection between them — a projection
+        # binds no coordinate, so it cannot be the one the result is evaluated over. A blocked
+        # carrier's weight cone reaches its score through exactly one such level.
+        parent = next(
+            (
+                found
+                for depth in range(len(site.hops) - 1, -1, -1)
+                if (found := next((s for s in self._all_sites() if s.hops == site.hops[:depth]), None)) is not None
+                and getattr(found.node, "axis", None) is not None
+            ),
+            None,
+        )
+        ax = self.axis_of(parent.node.axis) if parent is not None else None
         if ax is None:
             return None
-        return orient((free[-2], ax.window.parent if ax.window is not None else ax))
+        return orient((free[-2], ax.window.parent if ax.window is not None and not ax.window.block else ax))
 
 
 def sched_of(tile) -> Sched:

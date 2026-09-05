@@ -101,23 +101,18 @@ the placement fork; a Loop IR fusion or emission workaround sees one kernel at a
 construction. Copies that differ in captured axis names cannot share an object and stay with value clustering; copies
 that differ in exposed result names stay distinct because unifying them would rename their consumers.
 
-An output sweep used by any nested contraction operand is promoted into the Tile's free-axis placement. Promotion
-expands the enclosing-axis context, so construction normalizes the Fold tree once more under that final scope; one
-construction and a reconstruction therefore expose the same closed operand edges and placement seams.
-The invariant also applies when a schedule row constructs or reloads an already-mapped Tile: promotion extends the
-grid in lockstep with the free axes, so per-cell replication never mistakes the swept coordinate for an SSA name.
-
-**One enumeration.** A kernel's grid enumerates its output cells ONCE. Sibling promoted sweeps of different widths
-therefore ride ONE axis — the widest — decided at formation (`_fromloop._shared_output_axis`), with post-init's
-promotion consuming that decision. A narrower region rides the shared axis's first cells: its reads clamp
-(`host % extent`, so a cell past its own extent recomputes a valid row instead of reading past its operand) and its
-stores carry that extent as the `OutputSpec.guard` both reconstitution spellings honour (`OutputSpec.guarded`, applied
-by `Fold.lower` and `apply_output_specs` alike). One free axis per sweep would instead make the grid the CARTESIAN
-PRODUCT of the kernel's output widths, and every region would be enumerated once per cell of every other — a correct
-kernel (the stores are idempotent) doing the work of the product instead of the sum: the fused q/k/v projection
-recomputing and rewriting q once per column of the k/v axis, the NVFP4 post-attention re-encode asking for a
-2^31-point launch off outputs 2048, 256 and 4096 wide. The decision belongs to formation because it rewrites the term,
-and by post-init the tile is already a graph node whose construction exceptions read as fusion refusals.
+The kernel's SHARED output sweep — an axis on every store's sweep path — is promoted into the Tile's free-axis
+placement when any nested contraction operand reads it: the coordinate is that contraction's output coordinate, and
+promoting an axis every store rides replicates nothing but the statistics evaluated ahead of the sweep. A sibling
+output nest's axis is never promoted, however many contractions read it: the other nests do not ride it, so promoting
+it would evaluate them once per cell — DeepSeek-V4 post4096's residual root holds four sibling nests, and promoting
+all seven of their axes made its grid their product, 2^56 cells, which no launch can cover. A contraction under a
+sibling nest stays under its sweep loop, where `Fold.lower` places it like any term reading the axis, and the
+placement fork cuts it out at its own free coordinates. Promotion expands the enclosing-axis context, so construction
+normalizes the Fold tree once more under that final scope; one construction and a reconstruction therefore expose the
+same closed operand edges and placement seams. The invariant also applies when a schedule row constructs or reloads
+an already-mapped Tile: promotion extends the grid in lockstep with the free axes, so per-cell replication never
+mistakes the swept coordinate for an SSA name.
 
 **Storage-decode factors hoist to the epilogue.** A product argument whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
@@ -146,14 +141,19 @@ as a supported slow path.
 
 A node's own canonical forms are formation's (`Fold.__post_init__` orients a bilinear term A-first, `Lambda` orders
 its body); `TileOp.__post_init__` applies the tree-wide ones and the legacy output-sweep-to-free-axis adjustment
-whenever a contraction operand reads the sweep axis. The contraction may be the root compute node or a later site in
-the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute output loop.
-Consecutive output specifications over one sweep axis reconstitute one loop, sibling sweeps sibling loops. The
+whenever a contraction operand reads the kernel's shared output sweep. The contraction may be the root compute node or
+a later site in the Fold tree; in either case the coordinate belongs in kernel placement rather than a post-compute
+output loop.
+A specification's `sweep` is the output loop NEST the store rode in the source, as an outermost-first axis path — the
+one fact extraction destroys, since a write's index names its coordinates but not the order its loops nested in.
+Consecutive output specifications over one path reconstitute one loop nest, sibling sweeps sibling loops, and a
+prefix two paths share is one source loop, opened once by the last group carrying it (DeepSeek-V4 post4096's gate
+stream nests two write-only sweeps beside the outer store; the softmax pair rides a two-deep write-only nest). The
 extraction round-trip gate is byte-identity: a stream is representable only when reconstitution reproduces it exactly.
 The lift guarantees that by forming each sweep's per-cell projection as a term of its level before extraction sees the
-stream, so an output loop reaches the boundary holding its writes alone. A write whose stored value is captured from
-the enclosing scope unchanged (`o[j] = acc`, broadcasting an already-reduced accumulator) needs no term: nothing is
-evaluated over `j`, and its sweep spec alone binds the axis.
+stream, so an output loop reaches the boundary holding only its stores and nested output loops, at their source
+positions. A write whose stored value is captured from the enclosing scope unchanged (`o[j] = acc`, broadcasting an
+already-reduced accumulator) needs no term: nothing is evaluated over `j`, and its sweep spec alone binds the axis.
 
 A sweep axis is never bound at kernel scope: the term opens it itself (`Fold.lower` with the sweep left unbound), and
 the sweep store follows the term defining its value inside that loop. A non-contraction fold that reads a sweep axis
@@ -161,12 +161,12 @@ the sweep store follows the term defining its value inside that loop. A non-cont
 projection: its slabs read the sweep axis, so the placement rule puts its loop inside the sweep loop, while a
 sibling evaluated over the grid axes alone stays ahead of it. Two sibling sweeps are two coordinates: a loop that
 reuses an enclosing or sibling sweep's name (the fused quantize kernel's byte sweep and scale sweep, both `a1`) is
-alpha-renamed at the lift, binder and references together, since a term tree names one coordinate per name — and if
-both then promote, the shared-axis rule above merges them back onto one coordinate with a guard. The
+alpha-renamed at the lift, binder and references together, since a term tree names one coordinate per name. The
 kernel binder's serial arm hands the stores to the term the same way, so the emitted kernel places them exactly as
 the identity's `loop_body` does; only a projection stream spelled without the term (the peeled root's tail, a cut
-piece) still wraps the trailing run reading the axis into one loop. A contraction is exempt because post-init
-promotes a sweep its operands read into a real free axis right after normalization.
+piece) still wraps the trailing run reading the axis into one loop. A contraction reading the kernel's shared output
+sweep never meets this rule, because post-init promotes that sweep into a real free axis right after normalization;
+one reading a sibling nest's axis is placed by it like any other fold.
 
 A fold FED by the body — one whose subtree captures a name a plain body member defines — is likewise never hoisted,
 no matter what kind: a projection evaluates its operands before its scalar body, so the capture would read a value
@@ -271,10 +271,20 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
   positions; it does not mint alternate nodes or edge identities. The derivations memoize on the Fold ROOT, so every
   `TileOp` over one term shares them; the `TileOp` properties are accessors, not a second cache.
 - `path.sites` is a reading of that same walk, adding only what the codec needs: the ROUTE that reaches each site,
-  `(kind departed, operand taken)` per hop. A placement key spells that route — `PLACE@map.1/twist.1/inner.2/map`,
-  each departure as `kind.index`, the arrival's kind last — so it is unique by construction, with no ordinal, no
-  shortest-unique search and no axis name; a stale key fails at the first segment whose kind is not what stands
-  there. The codec owns spelling, resolution and ambiguity — not traversal.
+  `(kind departed, operand taken)` per hop. A placement key spells that route —
+  `PLACE@map.1/twist.1/inner.2/map`, each departure as `kind.index`, the arrival's kind last — so it is unique by
+  construction, with no ordinal, no shortest-unique search and no axis name; a stale key fails at the first segment
+  whose kind is not what stands there. The codec owns spelling, resolution and ambiguity — not traversal.
+- An axis `Window` records which rewrite already reshaped the stream it walks: `partition` for the
+  one a cross-CTA split produced, `block` for both axes a blocked stream splits into. Both refuse a
+  second rewrite of the same kind; they differ in what the geometry means, and a nested contraction
+  reads its enclosing fold's axis as the tile's n through exactly that difference — a partition
+  slice reports its pre-split parent (the fragment clamps were built against it) while a block
+  reports its OWN axis, because the enclosing fold walks one block at a time. The two blocked axes
+  are told apart by `Axis.step`, which only the outer one carries: it walks the stream's extent in
+  strides of the block, so no width enters the index arithmetic and `lower` renders it as a
+  `StridedLoop`. `Axis.trips` is the reading every partition sizes itself against — `ceil(extent /
+  step)`, which for a strided axis is not its extent.
 - `KernelSchedule`, `ProjectionSchedule` / `ReductionSchedule`, and `EdgeSchedule` contain choices only. They do not
   cache paths, classifications, shapes, placed geometry, resolved shared-memory sizes, or codec spellings.
 - `ClassicScheduleContext` derives local support after selecting a node and its incident edges. `extend` composes it

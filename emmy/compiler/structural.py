@@ -68,14 +68,21 @@ class Structural(Protocol):
 
 
 def instance_memo(obj, slot: str) -> dict:
-    """The named per-instance memo table riding an IMMUTABLE object — the structural-key
-    pattern, as one mechanism: a derived read caches on the term it derives from (the table is
-    created on first use via ``object.__setattr__``, so frozen dataclasses take it), and the
-    owner's ``__getstate__`` strips it so no cache — an id-keyed one especially — crosses a
-    process boundary. The retired bottom-up term hasher originated the pattern with its
-    single-slot form; the normalize fixpoint stamp (``ir/tile/normalize.py``) and the codec's
-    spelling tables (``ir/tile/path.py``) go through this table form. A memo holds ONLY values
-    derivable from the object; never decisions, never mutable policy."""
+    """The named per-instance memo table riding an IMMUTABLE object: a derived read caches on the
+    term it derives from (the table is created on first use via ``object.__setattr__``, so frozen
+    dataclasses take it), and the owner's ``__getstate__`` strips it so no cache — an id-keyed one
+    especially — crosses a process boundary. A memo holds ONLY values derivable from the object;
+    never decisions, never mutable policy.
+
+    DEPRECATED, and closed to new callers. The undeclared attribute this stashes into is what
+    STYLE.md's "Derived values are first-class members" rule forbids: it is invisible to readers of
+    the class, dodges the pickling rules, and smears one type's functionality across whichever
+    module caches for it. A derived read belongs on the type that owns it — a ``cached_property``
+    returning the whole keyed family, or a field computed in ``__post_init__``. The remaining
+    callers (the classic domains' membership indexes, the per-target support tables, the codec
+    spelling tables, the normalize fixpoint stamp) are to be converted; ``_target_memo`` is the
+    hard one, since it keys a table by ``id(target)`` and stores it on ``tile_op`` — a fact about a
+    PAIR, stashed on one member of it."""
     table = obj.__dict__.get(slot)
     if table is None:
         table = {}
@@ -129,7 +136,7 @@ def form(value: object) -> object:
     if own_key is not None and own_key is not Structural.structural_key:
         return (type(value).__name__, value.structural_key())
     if dataclasses.is_dataclass(value) and not isinstance(value, type):
-        return (type(value).__name__, *(form(getattr(value, f.name)) for f in dataclasses.fields(value)))
+        return (type(value).__name__, *_rendered_fields(value))
     name = getattr(value, "name", None)
     if isinstance(name, str):
         return (type(value).__name__, name)
@@ -138,6 +145,24 @@ def form(value: object) -> object:
         "identity. Add a rule in structural.form: render the part of it that IS the identity, and "
         "drop the part that is incidental. Do not fall back to repr — that is what this replaced."
     )
+
+
+def _rendered_fields(value) -> list:
+    """One dataclass's fields, less the TRAILING ones left at their default.
+
+    A field a value does not use says nothing about what that value IS, and rendering it anyway
+    means a dataclass that GROWS one moves the identity of every value in the tree — every kernel,
+    every recorded row, every corpus case — for a field none of them set. Trailing only, so the
+    rendering stays positional: a default in the middle still holds its place.
+    """
+    fields = dataclasses.fields(value)
+    rendered = [form(getattr(value, field.name)) for field in fields]
+    while rendered:
+        field = fields[len(rendered) - 1]
+        if field.default is dataclasses.MISSING or getattr(value, field.name) != field.default:
+            break
+        rendered.pop()
+    return rendered
 
 
 def digest(*parts: object) -> str:

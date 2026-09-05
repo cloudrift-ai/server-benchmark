@@ -559,3 +559,87 @@ def test_greedy_run_raises_when_the_projection_tail_is_mis_sliced():
         Pipeline(passes=[pass_]).run(_graph_with_tile(), ctx=_small_smem_ctx())
     assert "'y'" in str(exc.value)
     assert "acc2" in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
+# A refused row on ONE piece of a composed route re-ranks that piece inside the
+# same structural route; the structural decision is revisited only once no row
+# of the piece binds. Observed on the DeepSeek-V4 ``post4096`` twin: the greedy
+# elected the composed placement route, the residual root's top-ranked row was
+# refused by the kernel binder (an output-tiled root forest covering an
+# incomplete projection), and the strategy retired the structural picks
+# wholesale — deploying one 2^38-trip fused kernel instead of the ten-kernel
+# plan that was one refused row away.
+# ---------------------------------------------------------------------------
+
+
+def _composed_fragment() -> Graph:
+    """The composed route ``x -> y_ws (k_ws) -> y__cut (k_residual)`` replacing ``y``; the splice
+    hands ``y``'s id to the residual root, so the terminal tells the routes apart by op name."""
+    g = Graph()
+    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,), "f32"), node_id="x")
+    g.add_node(op=TileOp(name="k_ws"), inputs=["x"], output=Tensor("y_ws", (4,), "f32"), node_id="y_ws")
+    g.add_node(op=TileOp(name="k_residual"), inputs=["y_ws"], output=Tensor("y__cut", (4,), "f32"), node_id="y__cut")
+    g.outputs = ["y__cut"]
+    return g
+
+
+def _composed_route_pipeline(refused: set[int]) -> Pipeline:
+    """Pass 0 is the kernel-set fork at ``y``: two fused rows (``BN=8, 16``) beside the composed
+    route. Pass 1 schedules each piece (``BN=8, 16``). Pass 2 materializes every row except the
+    residual root's ``refused`` ones, which it declines with a rejecting skip — the kernel
+    binder's projection-ownership refusal."""
+    from dataclasses import replace
+
+    from emmy.compiler.pipeline.fork import OptionFork
+    from emmy.compiler.pipeline.pipeline import RuleSkipped
+
+    def cut(root):
+        if root.op.name != "k_test" or "BN" in root.op.knobs:
+            raise RuleSkipped("not the kernel-set fork")
+        fused = [OptionFork(option=TileOp(name="k_test", knobs={"BN": bn}), knobs={"BN": bn}) for bn in (8, 16)]
+        return [*fused, OptionFork(option=_composed_fragment())]
+
+    def schedule(root):
+        if "BN" in root.op.knobs:
+            raise RuleSkipped("already scheduled")
+        return [OptionFork(option=replace(root.op, knobs={"BN": bn}), knobs={"BN": bn}) for bn in (8, 16)]
+
+    def materialize(root):
+        bn = root.op.knobs["BN"]
+        if root.op.name == "k_residual" and bn in refused:
+            raise RuleSkipped("kernel binder refuses this row's projection ownership", reject=True)
+        return KernelOp(body=[Smem(name="buf", extents=(64,), dtype="float")], name=root.op.name, knobs={"BN": bn})
+
+    passes = []
+    for i, (name, fn) in enumerate((("__cut__", cut), ("__schedule__", schedule), ("__materialize__", materialize))):
+        rule = Rule(name=name, pattern=[Pattern(name="root", op_type=TileOp)], rewrite=fn, param_names=("root",))
+        rule.pass_ = Pass(name=name, rules=[rule], index=i)
+        passes.append(rule.pass_)
+    return Pipeline(passes=passes)
+
+
+def _elect_composed_route(monkeypatch) -> None:
+    """The prior ranks ``BN=16`` first; the composed route prices below the fused side."""
+    import emmy.compiler.pipeline.search.policy.greedy as greedy_mod
+
+    monkeypatch.setattr(greedy_mod, "_load_prior_safe", lambda: _BiggestBNFirstPrior())
+    monkeypatch.setattr(greedy_mod, "_price_graph", lambda *_: 1.0)
+    monkeypatch.setattr(greedy_mod, "_price_op_leaf", lambda *_: 10.0)
+
+
+def test_refused_piece_row_reranks_within_the_composed_route(monkeypatch):
+    _elect_composed_route(monkeypatch)
+    terminal = _composed_route_pipeline(refused={16}).run(_graph_with_tile(), ctx=_small_smem_ctx())
+    residual, ws = terminal.nodes["y"].op, terminal.nodes["y_ws"].op
+    assert isinstance(residual, KernelOp) and residual.name == "k_residual", "the composed route survives one refused row"
+    assert residual.knobs["BN"] == 8, "the refused piece re-ranks onto its next row"
+    assert isinstance(ws, KernelOp) and ws.knobs["BN"] == 16, "the other piece keeps its pick"
+
+
+def test_structural_pick_is_revisited_only_when_no_piece_row_binds(monkeypatch):
+    _elect_composed_route(monkeypatch)
+    terminal = _composed_route_pipeline(refused={8, 16}).run(_graph_with_tile(), ctx=_small_smem_ctx())
+    fused = terminal.nodes["y"].op
+    assert isinstance(fused, KernelOp) and fused.name == "k_test", "every row refused → the fused route is the fallback"
+    assert "y_ws" not in terminal.nodes

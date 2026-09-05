@@ -430,8 +430,7 @@ def knob_features(knobs: dict) -> dict[str, float]:
     feats.setdefault("MMA_tier", 0.0)  # scalar tier / no schedule node = no warp atom
     work = _serial_cell_trips(knobs)
     if work:
-        # The one feature monotone in per-thread serial work — what the pricing policy's
-        # calibration bound (:func:`serial_floor_us`) rests on, and a fit signal for the priors.
+        # The one feature monotone in per-thread serial work — a fit signal for the priors.
         feats["D_serial_cell_work"] = math.log2(1.0 + work)
     return feats
 
@@ -447,27 +446,6 @@ def _serial_cell_trips(knobs: dict) -> float:
         return 0.0
     decomp = _reduce_decomp(knobs)
     return work / max(decomp.cta * decomp.coop, 1)
-
-
-#: Serial-work calibration bound, µs per per-thread serial trip. This is an ISSUE-RATE bound,
-#: not a dependency-latency one: even fully independent, perfectly pipelined trips each issue at
-#: least one instruction, and no current GPU issues a thread's instruction faster than ~0.1 ns —
-#: dependence chains, multi-statement bodies, or an ``Mma`` in the trip body only raise the true
-#: cost, never lower it. The one slack this leaves — a trip whose real cost is far above 0.1 ns —
-#: is absorbed by the enforcement guard at the consumer: the bound only ever decides where it is
-#: orders of magnitude past every legitimate kernel, so under-estimating a trip never flips an
-#: honest election.
-SERIAL_TRIP_FLOOR_US = 1e-4
-
-
-def serial_floor_us(knobs: dict) -> float:
-    """A physical lower bound, in µs, on one launch of the kernel the row ``knobs`` describes:
-    its per-thread serial trips at the per-trip bound. True regardless of any model, so a
-    kernel-set comparison may clamp an estimated summand to it — and a measured µs is never below
-    it, so clamping measurements is a no-op. It is a BOUND, not an estimate: it ignores launch
-    overhead and memory traffic, so its jurisdiction is where it is decisively large (the
-    enforcement guard lives with the clamp, ``policy/greedy._resolved_price``)."""
-    return _serial_cell_trips(knobs) * SERIAL_TRIP_FLOOR_US
 
 
 def _free_slots(knobs: dict) -> tuple[int, int, int, int] | None:

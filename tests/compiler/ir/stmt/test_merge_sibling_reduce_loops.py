@@ -12,7 +12,7 @@ then merge must concatenate the bodies into one K-loop.
 from __future__ import annotations
 
 from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.stmt.blocks import Loop
 from emmy.compiler.ir.stmt.body import Body
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Load, Write
@@ -187,9 +187,10 @@ def test_merge_skips_when_second_loop_reads_first_loops_accum() -> None:
     assert len(loops) == 2, "softmax-style sequential reduces must stay distinct"
 
 
-def test_merge_skips_on_ssa_name_collision() -> None:
-    """If both bodies define the same SSA name, merging would create
-    inner-scope shadowing — skip rather than guess a rename."""
+def test_merge_renames_a_colliding_local_rather_than_refusing() -> None:
+    """Two bodies binding one name for UNRELATED values is a collision, not a dependence — and it
+    is what alpha-equal copies of a single cone always look like. The incoming body's local is
+    renamed apart and the merge proceeds."""
     a = Axis("k", 16)
     body = Body(
         (
@@ -201,7 +202,91 @@ def test_merge_skips_on_ssa_name_collision() -> None:
     out = merge_sibling_reduce_loops(body)
 
     loops = [s for s in out if isinstance(s, Loop)]
-    assert len(loops) == 2, "name collision on 'v' must block the merge"
+    assert len(loops) == 1
+    loads = {s.input: s.names[0] for s in loops[0].body if isinstance(s, Load)}
+    assert loads["A"] != loads["B"], "each half keeps its own binding"
+    accums = {s.name: s.value for s in loops[0].body if isinstance(s, Accum)}
+    assert accums["acc0"] == loads["A"] and accums["acc1"] == loads["B"]
+
+
+def test_merge_refuses_a_collision_on_a_name_the_loop_still_binds() -> None:
+    """A carrier of the incoming Loop's own scope is declared ahead of that loop and read after
+    it, so a rename could not reach its readers. That one collision refuses."""
+    a = Axis("k", 16)
+    body = Body(
+        (
+            Loop(axis=a, body=(Load(name="p", input="A", index=(Var("k"),)), Accum(name="acc", value="p"))),
+            Loop(axis=a, body=(Load(name="q", input="B", index=(Var("k"),)), Accum(name="acc", value="q"))),
+            Write(output="out", index=(Var("n"),), value="acc"),
+        )
+    )
+
+    out = merge_sibling_reduce_loops(body)
+
+    assert len([s for s in out if isinstance(s, Loop)]) == 2
+
+
+def test_merge_renames_an_accum_that_stays_inside() -> None:
+    """The counterpart, and the case a blocked reduce hits: an ``Accum`` bound in a NESTED loop
+    crosses that loop's boundary but is consumed within this body. Nothing outside reads it, so it
+    renames apart like any other local."""
+    outer, inner = Axis("k", 16), Axis("d", 8)
+
+    def half(tag: str) -> Loop:
+        return Loop(
+            axis=outer,
+            body=(
+                Loop(axis=inner, body=(Load(name="v", input=tag, index=(Var("k"), Var("d"))), Accum(name="acc0", value="v"))),
+                Accum(name=f"out_{tag}", value="acc0"),
+            ),
+        )
+
+    out = merge_sibling_reduce_loops(Body((half("A"), half("B"))))
+
+    assert len([s for s in out if isinstance(s, Loop)]) == 1
+
+
+def test_unify_groups_loops_indexed_affinely_in_the_reduce_axis() -> None:
+    """A BLOCKED reduce reads its stream at ``outer·B + inner``. The axis still walks that
+    dimension, so siblings over one block must unify — refusing anything but a bare ``Var`` left
+    them unmergeable for no semantic reason."""
+    o = Var("o")
+    blocked = [
+        Loop(
+            axis=Axis(name, 64),
+            body=(
+                Load(name=f"v_{name}", input="x", index=(BinaryExpr("+", BinaryExpr("*", o, Literal(64, "int")), Var(name)),)),
+                Accum(name=f"acc_{name}", value=f"v_{name}"),
+            ),
+        )
+        for name in ("i", "j")
+    ]
+
+    out = unify_sibling_reduce_axes(Body(tuple(blocked)))
+
+    names = {s.axis.name for s in out if isinstance(s, Loop)}
+    assert len(names) == 1, "affine siblings over one block index the same dimension"
+
+
+def test_unify_keeps_apart_blocks_at_different_offsets() -> None:
+    """``o·B + i`` and ``o·B + 32 + j`` walk different halves of the same dimension. Seeing through
+    the offset would unify them and miscompile; the anchor is on the key so they stay distinct."""
+    o = Var("o")
+
+    def at(name: str, extra: int) -> Loop:
+        base = BinaryExpr("*", o, Literal(64, "int"))
+        shifted = base if not extra else BinaryExpr("+", base, Literal(extra, "int"))
+        return Loop(
+            axis=Axis(name, 32),
+            body=(
+                Load(name=f"v_{name}", input="x", index=(BinaryExpr("+", shifted, Var(name)),)),
+                Accum(name=f"acc_{name}", value=f"v_{name}"),
+            ),
+        )
+
+    out = unify_sibling_reduce_axes(Body((at("i", 0), at("j", 32))))
+
+    assert len({s.axis.name for s in out if isinstance(s, Loop)}) == 2
 
 
 def test_merge_skips_when_between_stmt_def_used_by_second_loop() -> None:
@@ -306,3 +391,109 @@ def test_unify_then_merge_collapses_gated_mlp_pattern() -> None:
     assert accs_inside == ["acc0", "acc1"]
     x_loads = [s for s in loops[0].body if isinstance(s, Load) and s.input == "x"]
     assert len(x_loads) == 2, "dedup happens in a later pass — merge alone leaves both x loads"
+
+
+def test_merge_collapses_three_alpha_equal_siblings() -> None:
+    """Merging is pairwise, so a third copy has to fold into the pair already merged: each binds
+    ``acc0`` for its own value, and all three end up in one loop."""
+    outer, inner = Axis("k", 16), Axis("d", 8)
+
+    def half(tag: str) -> Loop:
+        return Loop(
+            axis=outer,
+            body=(
+                Loop(axis=inner, body=(Load(name="v", input=tag, index=(Var("k"), Var("d"))), Accum(name="acc0", value="v"))),
+                Accum(name=f"out_{tag}", value="acc0"),
+            ),
+        )
+
+    out = merge_sibling_reduce_loops(Body((half("A"), half("B"), half("C"))))
+
+    assert len([s for s in out if isinstance(s, Loop)]) == 1
+
+
+def _blocked_channel(block: Axis, inner: Axis, tag: str, tail: tuple) -> Loop:
+    """One inner fold of a blocked twisted carrier: re-derive the score over the block, weigh it
+    against the block pivot, then accumulate this channel's own contribution.
+
+    Every channel is an alpha-equal copy of the same cone down to the spellings — the weight's
+    temps come out of ONE stored combine — and each recomputes the score, which is the recompute
+    the merge exists to remove.
+    """
+    score = BinaryExpr("+", BinaryExpr("*", Var("a2_o"), Literal(64, "int")), Var(block.name))
+    return Loop(
+        axis=block,
+        body=(
+            Loop(
+                axis=inner,
+                body=(
+                    Load(name="in1", input="x0", index=(Var(inner.name),)),
+                    Load(name="in2", input="x1", index=(score, Var(inner.name))),
+                    Assign(name="v0", op="multiply", args=("in1", "in2")),
+                    Accum(name="acc0", value="v0"),
+                ),
+            ),
+            Assign(name="v1", op="multiply", args=("acc0", "scale")),
+            Assign(name="acc1__o__gn", op="maximum", args=("acc1__blk", "v1")),
+            Assign(name="acc1__o__dg_o", op="subtract", args=("v1", "acc1__o__gn")),
+            Assign(name="acc1__o__beta", op="exp", args=("acc1__o__dg_o",)),
+            *tail,
+            Accum(name=f"{tag}__blk", value=f"{tag}__blk__e"),
+        ),
+    )
+
+
+def test_merge_collapses_the_channel_loops_of_a_blocked_twisted_carrier() -> None:
+    """The shape blocking attention's carrier produces: a block pivot, then one inner loop per
+    channel, all over the same block. The pivot must stay apart — the weight reads its finished
+    accumulator — and the channels must collapse, which is what takes ``Q·K`` from three passes
+    over the block to two.
+
+    The enclosing scope re-binds the very temps the channels use (``acc1__o__gn`` and friends are
+    the stored combine's, instantiated in both places), so a merge gate that asks whether a name
+    is read anywhere around the pair — instead of what the loop itself still binds — refuses here.
+    """
+    block, inner = Axis("a2_p", 64), Axis("a3", 32)
+    score = BinaryExpr("+", BinaryExpr("*", Var("a2_o"), Literal(64, "int")), Var("a2_p"))
+    pivot = Loop(
+        axis=block,
+        body=(
+            Loop(
+                axis=inner,
+                body=(
+                    Load(name="in1", input="x0", index=(Var("a3"),)),
+                    Load(name="in2", input="x1", index=(score, Var("a3"))),
+                    Assign(name="v0", op="multiply", args=("in1", "in2")),
+                    Accum(name="acc0", value="v0"),
+                ),
+            ),
+            Assign(name="acc1__blk__e", op="multiply", args=("acc0", "scale")),
+            Accum(name="acc1__blk", value="acc1__blk__e"),
+        ),
+    )
+    expectation = _blocked_channel(
+        Axis("a2_c1", 64),
+        inner,
+        "acc5__sum",
+        (
+            Load(name="in7", input="x2", index=(score, Var("a5"))),
+            Assign(name="acc5__sum__blk__e", op="multiply", args=("acc1__o__beta", "in7")),
+        ),
+    )
+    denominator = _blocked_channel(Axis("a2_c2", 64), inner, "acc3", (Assign(name="acc3__blk__e", op="copy", args=("acc1__o__beta",)),))
+    combine = (
+        Assign(name="acc1__o__gn", op="maximum", args=("acc1", "acc1__blk")),
+        Assign(name="acc1__o__dg_o", op="subtract", args=("acc1__blk", "acc1__o__gn")),
+        Assign(name="acc1__o__beta", op="exp", args=("acc1__o__dg_o",)),
+        Accum(name="acc5__sum", value="acc5__sum__blk"),
+        Accum(name="acc3", value="acc3__blk"),
+        Accum(name="acc1", value="acc1__o__gn"),
+    )
+
+    out = merge_sibling_reduce_loops(unify_sibling_reduce_axes(Body((pivot, expectation, denominator, *combine))))
+
+    loops = [s for s in out if isinstance(s, Loop)]
+    assert len(loops) == 2, "the pivot stays apart; the two channels merge"
+    assert [s.name for s in loops[0].body if isinstance(s, Accum)] == ["acc1__blk"]
+    assert [s.name for s in loops[1].body if isinstance(s, Accum)] == ["acc5__sum__blk", "acc3__blk"]
+    assert len([s for s in loops[1].body if isinstance(s, Loop)]) == 2, "both score passes are inside now"

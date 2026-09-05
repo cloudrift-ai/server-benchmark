@@ -53,12 +53,16 @@ arriving as ordinary statements.
 
 **Derived reads memoize on the immutable term; pickling carries only the stored params.** A term's
 expensive derived reads — the structural key, `Fold.deps`, `Lambda.free_names`, the synthesized
-`loop`, the normalize fixpoint stamp, the codec's spelling tables — ride the instance
-(`cached_property` entries and `structural.instance_memo` tables), which is sound because the term
-never changes, and is what keeps a walk over a large fused tree linear instead of re-deriving every
-subtree per ancestor. `__getstate__` strips them: every memo recomputes after transport, and an
-id-keyed cache carried across processes could collide with a fresh object's id. A memo holds only
-values derivable from the term — never decisions, never mutable policy.
+`loop`, the normalize fixpoint stamp, the codec's spelling tables — ride the instance, which is what
+keeps a walk over a large fused tree linear instead of re-deriving every subtree per ancestor. They
+are declared members: a `cached_property` on the type that owns the value, or a field computed in
+`__post_init__`, per STYLE.md. `__getstate__` strips them: every memo recomputes after transport,
+and an id-keyed cache carried across processes could collide with a fresh object's id. A memo holds
+only values derivable from the term — never decisions, never mutable policy.
+
+The `structural.instance_memo` tables are a holdout predating that rule, not a second sanctioned
+form. STYLE.md forbids the undeclared memo slot they stash into; new derived reads take a declared
+member, and the existing tables are to be converted to one.
 
 **Tile IR stores terms, not statements.** `TileOp` holds the `Fold` term; the typed classic
 schedule, materialization, output specifications, and knobs belong to `TileOp`, not the term. So `Fold` lives in
@@ -478,6 +482,12 @@ the shared substrate behind the rules that slice cones (the demoted-operand prod
 `lowering/tile/030_cut`) — eligibility judgments stay in the rules, per
 `pipeline/passes/ARCHITECTURE.md`.
 
+`backward_cone` resolves reads by NAME over a body it assumes is SSA, so it is only sound where one name has one
+def. `Lambda.cone` is the caller that cannot assume it: a stored combine takes its states in as params and writes
+them back on the way out to spell its results (`Recipe.program`), so a read of the INCOMING state would resolve
+forward to the write-back. A param names itself, and `cone` keeps it that way by hiding the re-bindings from the
+walk. Any other caller that cones a non-SSA body owes itself the same reading.
+
 `rewrite` has two distinct rename channels that must stay disjoint:
 `rename_ssa` carries **SSA-name** renames, `sigma` carries **axis**
 substitutions. `Load`/`Write` index exprs apply *both*
@@ -499,13 +509,6 @@ may spell the same as the enclosing contraction's): `fold.subst_free(stmt, sigma
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
 cell coordinates through.
 
-σ over a term also moves the term's own BINDERS. A lambda is closed, so its params past the operand correspondence are
-exactly the coordinates its body reads; a σ answering with an expression rather than a variable (the shared output
-axis's `a1_1 → a1 % 32` clamp) retires the substituted param and introduces the expression's own coordinates instead.
-The `Fold` rewrite handler therefore re-CLOSES through `Lambda.closing`: it keeps the iteration var and the
-operand-bound prefix where every positional reading expects them, and appends what the rewritten body still reads as
-trailing params. With no substituted coordinate the residual is empty and the rebuild is the plain rename it was.
-
 ### `ir/stmt/normalize.py` — structural canonicalization
 
 Pure `body → body` passes run from `LoopOp.__post_init__` so every
@@ -524,21 +527,21 @@ canonicalized before validation:
   so the same rule keeps it outside the axes it partitions without a naming convention.
 
 - `eliminate_copy_aliases` — drop `y = copy(x)` Assigns.
-- `unify_sibling_reduce_axes` — rename sibling reduce Loops whose
-  reduce-axis Load positions overlap on any `(source, dim)` pair so
-  they share one canonical axis name (softmax's max + sum sweeps; the
-  two matmul reductions in `silu(x@Wg) * (x@Wu)` that both index `x`
-  at the same K slot). Union-find groups all transitively-overlapping
-  Loops at one scope.
-- `merge_sibling_reduce_loops` — concatenate sibling reduce Loops that
-  share `axis.name` / `extent` into one Loop body. Gated on disjoint
-  SSA defs across the two halves, the second body not reading any name
-  the first body defines (blocks softmax-style sequential reduces
-  where sum-exp reads `acc_max`), and no between-stmt def consumed by
-  the second loop. Eliminates the duplicate K traversal in patterns
-  like `silu(x@Wg) * (x@Wu)`; subsequent normalization collapses the
-  duplicate `x` loads, and the lowering passes stage both weight tensors
-  symmetrically.
+- `unify_sibling_reduce_axes` — rename sibling reduce Loops whose reduce-axis Load positions overlap so they share one
+  canonical axis name (softmax's max + sum sweeps; the two matmul reductions in `silu(x@Wg) * (x@Wu)` that both index
+  `x` at the same K slot). A position is `(source, dim, anchor, coefficient)`, read through `affine_form`: a blocked
+  reduce indexes its stream at `o·B + i` and still walks that dimension, while the anchor keeps `o·B + i` apart from
+  `o·B + 32 + j`, which walk different halves. Union-find groups all transitively-overlapping Loops at one scope.
+- `merge_sibling_reduce_loops` — concatenate sibling reduce Loops that share `axis.name` / `extent` into one Loop body.
+  Every gate is phrased over what the second Loop reads from its ENCLOSING scope (`free_names` — what it uses and does
+  not bind itself): it must read no name the first body defines (blocking softmax-style sequential reduces where
+  sum-exp reads `acc_max`), and no between-stmt def. Names both bodies merely happen to bind are a COLLISION, not a
+  dependence — two alpha-equal copies of one cone always share every spelling — so the incoming body's copies rename
+  apart. Only a name the incoming Loop still binds after it closes (its immediate carriers, which `Loop.render`
+  declares ahead of the loop) refuses, because the rename cannot reach that name's readers outside. Eliminates the
+  duplicate K traversal in patterns like `silu(x@Wg) * (x@Wu)`, and the duplicate score pass between the channels of a
+  blocked twisted carrier; subsequent normalization collapses the duplicate loads, and the lowering passes stage both
+  weight tensors symmetrically.
 - `split_invariant_divides` — rewrite `divide(x, y)` into
   `reciprocal(y) + multiply(x, recip)` when `y` is loop-invariant
   w.r.t. some axis `x` depends on, so the rcp can hoist out of the

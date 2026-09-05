@@ -1,26 +1,33 @@
 """Body-level normalization passes.
 
 Pure ``body → body`` transforms applied via :func:`normalize_body` from
-``LoopOp.__post_init__`` and ``TileOp.__post_init__`` so every constructed
-Op lands in canonical form. The passes operate on the shared Stmt
-vocabulary (``Loop``, ``Load``, ``Assign``, ``Accum``, ``Select``,
-``Write``) and recurse through every block-structured Stmt
-(``Loop`` / ``StridedLoop`` / ``Tile`` / ``Cond``) so they apply uniformly
-to Loop IR and Tile IR bodies.
+``LoopOp.__post_init__`` and from :meth:`Body.structural_key`, so a
+constructed Loop-IR Op and every identity digest land in canonical form. The
+passes operate on the shared Stmt vocabulary (``Loop``, ``Load``, ``Assign``,
+``Accum``, ``Select``, ``Write``) and recurse through every block-structured
+Stmt (``Loop`` / ``StridedLoop`` / ``Tile`` / ``Cond``).
+
+A ``TileOp`` does NOT run these: it normalizes its TERM
+(``normalize_fold_tree``), and the kernel it materializes is built straight
+from ``Fold.lower``. So a body these passes could improve reaches the emitter
+unchanged whenever it comes down the term path — the sibling-loop merge below
+is reachable from Loop IR and from the digest, not from a materialized
+``KernelOp``.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import replace
+from itertools import count
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Expr, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body
-from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Pack, Select, Unpack, Write
+from emmy.compiler.ir.stmt.body import Body, _exposed_defines, free_names
+from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Mma, Pack, Select, Unpack, Write
 
 # ---------------------------------------------------------------------------
 # Visitor helpers shared by every pass below
@@ -317,7 +324,7 @@ def _unify_siblings(body: Body) -> Body:
     # extents matches both static and symbolic siblings: two ``Dim('seq_len')``
     # siblings unify (both back to ``Var('seq_len')``); two distinct symbolic
     # names don't. ``Expr`` is frozen + hashable so it slots into the tuple key.
-    entries: list[tuple[int, str, object, frozenset[tuple[str, int]]]] = []
+    entries: list[tuple[int, str, object, frozenset[tuple[str, int, object, int]]]] = []
     for i, s in enumerate(stmts):
         if isinstance(s, Loop) and s.is_reduce:
             positions = _reduce_axis_source_positions(s.body, s.axis.name)
@@ -360,17 +367,33 @@ def _unify_siblings(body: Body) -> Body:
     return Body(stmts)
 
 
-def _reduce_axis_source_positions(body: Body, reduce_axis_name: str) -> set[tuple[str, int]]:
-    """Collect ``(source, dim)`` positions where ``Var(reduce_axis_name)``
-    appears bare in a Load index within ``body`` (recursing into nested
-    blocks)."""
-    return {
-        (s.input, dim)
-        for s in body.iter()
-        if isinstance(s, Load)
-        for dim, e in enumerate(s.index)
-        if isinstance(e, Var) and e.name == reduce_axis_name
-    }
+def _reduce_axis_source_positions(body: Body, reduce_axis_name: str) -> set[tuple[str, int, object, int]]:
+    """Collect ``(source, dim, anchor, coefficient)`` positions where a Load index within ``body``
+    is AFFINE in ``Var(reduce_axis_name)`` (recursing into nested blocks).
+
+    A bare ``Var`` is the ``(source, dim, 0, 1)`` case, so this generalizes the original bare-Var
+    reading rather than replacing it. Affine matters because a BLOCKED reduce reads its stream at
+    ``outer·B + inner``: the axis still walks that dimension, and refusing to see it left sibling
+    loops over one block unmergeable for no semantic reason.
+
+    The anchor and coefficient ride the key because that is what makes the reading sound. Two
+    siblings indexing ``x[…, o·B + i]`` and ``x[…, o·B + j]`` walk the SAME dimension and unify;
+    ``o·B + i`` against ``o·B + 32 + j`` walk different halves and must not. ``(source, dim)`` alone
+    cannot tell those apart — seeing through the offset would be a miscompile, not a generalization.
+    """
+    out: set[tuple[str, int, object, int]] = set()
+    for s in body.iter():
+        if not isinstance(s, Load):
+            continue
+        for dim, e in enumerate(s.index):
+            form = affine_form(e, {reduce_axis_name})
+            if form is None:
+                continue
+            anchor, coeffs = form
+            coeff = coeffs.get(reduce_axis_name, 0)
+            if coeff:
+                out.add((s.input, dim, anchor, coeff))
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -395,20 +418,22 @@ def merge_sibling_reduce_loops(stmts: Body) -> Body:
     """Merge sibling reduce ``Loop``s with matching ``axis.name`` and
     ``axis.extent`` into one Loop whose body is the concatenation.
 
-    Gates a merge on three conditions:
+    Gates a merge on three conditions, all phrased over what the second Loop
+    reads from its enclosing scope (:func:`free_names` — what it uses and does
+    not bind itself):
 
-    1. The two bodies have disjoint SSA defs — no name collision and
-       no inner-scope shadowing once they share one Loop.
-    2. The second Loop's body does not read any SSA name the first
-       Loop's body defines (including ``Accum`` exports). When it
-       does, the two reductions are sequentially dependent — e.g.
-       softmax's sum-exp loop reads ``acc_max`` from the preceding
-       max loop. Merging would replace that read of the *finalized*
-       max with a read of the in-flight per-iter value, changing
-       semantics.
-    3. No statement that sits between the two Loops defines an SSA
-       name the second Loop's body reads — otherwise the merge would
-       move that read above its def.
+    1. It reads no SSA name the first Loop's body defines. When it does, the
+       two reductions are sequentially dependent — e.g. softmax's sum-exp loop
+       reads ``acc_max`` from the preceding max loop. Merging would replace
+       that read of the *finalized* max with a read of the in-flight per-iter
+       value, changing semantics.
+    2. No statement between the two Loops defines a name it reads — otherwise
+       the merge would move that read above its def.
+    3. The names both bodies happen to bind are a COLLISION, not a dependence,
+       and the incoming body's copies rename apart — which is what makes two
+       alpha-equal copies of one cone mergeable at all. Only a name the incoming
+       Loop still binds after it closes (:func:`_carried_out`) refuses: the
+       rename cannot reach the readers that name has outside the loop.
 
     Statements that sit between the two original Loops stay in their
     original positions in the parent Body. References to the first
@@ -432,6 +457,32 @@ def merge_sibling_reduce_loops(stmts: Body) -> Body:
         return _merge_sibling_reduce_loops(Body(recursed))
 
     return walk(stmts)
+
+
+def _carried_out(body: Body) -> frozenset[str]:
+    """The names a ``Loop`` over ``body`` still binds after it CLOSES.
+
+    :meth:`Loop.render` declares the carriers of the immediate body ahead of the loop, so those —
+    and, under a nested loop that does not seed its own, that loop's carriers too — are the names a
+    later statement can still read. Every other definition lives inside the block the loop closes,
+    which is what makes it renamable when two loops merge.
+    """
+    out = {name for stmt in body if isinstance(stmt, (Accum, Mma)) for name in stmt.carried_names()}
+    for stmt in body:
+        if isinstance(stmt, Loop) and not stmt.seed:
+            out |= _carried_out(stmt.body)
+    return frozenset(out)
+
+
+def _rename_apart(body: Body, clashing: frozenset[str], taken: frozenset[str]) -> Body:
+    """``body`` with each name in ``clashing`` renamed to one neither side spells."""
+    used = set(body.ssa_defs) | set(body.ssa_uses) | set(taken)
+    mapping: dict[str, str] = {}
+    for name in sorted(clashing):
+        fresh = next(candidate for n in count(1) if (candidate := f"{name}__m{n}") not in used)
+        mapping[name] = fresh
+        used.add(fresh)
+    return Body(tuple(s.rename(mapping) for s in body))
 
 
 def _merge_sibling_reduce_loops(body: Body) -> Body:
@@ -458,24 +509,37 @@ def _merge_sibling_reduce_loops(body: Body) -> Body:
                 and t.axis.name == merged.axis.name
                 and t.axis.extent == merged.axis.extent
                 and t.unroll == merged.unroll
+                and t.seed == merged.seed
             ):
                 continue
+            # ONE reading of what the incoming loop needs from around it: the names it reads and
+            # does not bind itself. A name it both defines and uses is its own local — which is
+            # what two alpha-equal copies of a single cone always share — and counting those as
+            # reads reports a dependence that is not there.
+            reads = free_names(t)
             merged_defs = Body.coerce(merged.body).ssa_defs
-            if merged_defs & Body.coerce(t.body).ssa_defs:
+            if merged_defs & reads:
                 continue
-            if merged_defs & Body.coerce(t.body).ssa_uses:
+            incoming = Body.coerce(t.body)
+            # What is left of the shared spellings is a COLLISION, not a dependence: two bodies
+            # binding one name for unrelated values. Renaming the incoming body's copy apart is
+            # sound for every name the loop closes over; a name it still binds afterwards has
+            # readers the rename cannot reach, so that one refuses.
+            clashing = merged_defs & incoming.ssa_defs
+            if clashing & _carried_out(incoming):
                 continue
             between_defs: set[str] = set()
             for k in range(i + 1, j):
                 if k in consumed:
                     continue
                 between_defs |= Body.coerce(Body((items[k],))).ssa_defs
-            if between_defs & Body.coerce(t.body).ssa_uses:
+            if between_defs & reads:
                 continue
             merged = Loop(
                 axis=merged.axis,
-                body=Body(tuple(merged.body) + tuple(t.body)),
+                body=Body(tuple(merged.body) + tuple(_rename_apart(incoming, clashing, merged_defs))),
                 unroll=merged.unroll,
+                seed=merged.seed,
             )
             consumed.add(j)
         out.append(merged)
@@ -628,13 +692,30 @@ def hoist_loop_invariants(stmts: Body) -> Body:
             return False
         return axis not in _axis_deps(s)
 
+    def _crossing_a_definition(inner: list[Stmt], hoisted: list[Stmt]) -> list[Stmt]:
+        """``hoisted`` less every stmt reading a name the loop body still BINDS.
+
+        Axis-invariance alone does not earn a hoist. A nested reduction can export an
+        accumulator that varies with none of the outer axes while its own loop stays pinned
+        (attention's denominator is produced inside the value sweep, which is pinned by the
+        head-dim axis the value slab reads). Its consumer then reads as invariant and moves
+        above the definition. Iterated: un-hoisting one candidate can pin the next."""
+        while hoisted:
+            ids = {id(c) for c in hoisted}
+            bound = {name for c in inner if id(c) not in ids for name in _exposed_defines(c)}
+            keep = [c for c in hoisted if not (free_names(c) & bound)]
+            if len(keep) == len(hoisted):
+                break
+            hoisted = keep
+        return hoisted
+
     def walk(body: Body) -> list[Stmt]:
         new_body: list[Stmt] = []
         for s in body:
             if isinstance(s, (Loop, StridedLoop)):
                 inner = walk(s.body)
                 axis = s.axis.name
-                hoisted = [c for c in inner if _hoistable(c, axis)]
+                hoisted = _crossing_a_definition(inner, [c for c in inner if _hoistable(c, axis)])
                 hoisted_ids = {id(c) for c in hoisted}
                 stay = [c for c in inner if id(c) not in hoisted_ids]
                 new_body.extend(hoisted)

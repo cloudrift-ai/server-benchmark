@@ -45,6 +45,7 @@ from emmy.compiler.ir.stmt import (  # noqa: F401  (re-exported via __init__)
     Assign,
     Body,
     Cond,
+    Const,
     Init,
     Load,
     Loop,
@@ -477,6 +478,13 @@ def _validate(loop: LoopOp) -> None:
                 # the streaming Loop, so a post-loop sweep can read it).
                 defined.add(stmt.name)
                 exported_accs.add(stmt.name)
+            elif isinstance(stmt, Const):
+                # A pure constant binding — one scalar literal as an SSA name, which the
+                # twisted carrier's injection needs (softmax folds each element as
+                # ``(score, 1)``). Scoped like an Assign: a def, not an accumulator.
+                if stmt.name in defined:
+                    raise ValueError(f"Const {stmt.name!r}: name already defined")
+                defined.add(stmt.name)
             elif isinstance(stmt, Write):
                 if stmt.value not in defined:
                     raise ValueError(f"Write: value {stmt.value!r} not defined")

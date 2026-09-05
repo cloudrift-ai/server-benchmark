@@ -224,7 +224,7 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         for edge in site.node.operands
         if isinstance(edge, Fold) and edge.as_slab() is None
     }
-    outer = tuple(axis.name for axis in (*tile.place.free, *(store.sweep for store in tile.output_specs if store.sweep is not None)))
+    outer = tuple(axis.name for axis in (*tile.place.free, *(axis for store in tile.output_specs for axis in store.sweep)))
     occurrence_axes: dict[int, list[tuple]] = {}
     for site in all_sites[1:]:
         occurrence_axes.setdefault(id(site.node), []).append((*outer, *site.scope))
@@ -262,10 +262,16 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, tile, consumer, dtype_table)
         if dtypes is None:
             continue
-        seen.add(id(node))
         # A seam is evaluated over the coordinates its term READS, not the whole ambient scope: an
         # output sweep the grid carries for a sibling's sake is not one of this workspace's axes.
         axes = tuple(tile.axis_of(name) for name in dict.fromkeys(name for scope in scopes for name in scope) if name in node.free_axes)
+        if any(axis.window is not None and axis.window.block for axis in axes):
+            # A BLOCK is a working set INSIDE one kernel — the pivot's pass reaches its end and
+            # the channels read what it left behind. A seam evaluated over a block coordinate
+            # would write that working set to gmem once per block, which is the cost blocking
+            # exists to avoid, and leaves a piece whose whole output is one block.
+            continue
+        seen.add(id(node))
         out.append(
             CutSite(
                 node=node,

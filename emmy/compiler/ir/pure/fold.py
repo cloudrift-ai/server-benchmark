@@ -27,10 +27,11 @@ from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import Literal, Var
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, OutputSpec, Stmt
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, OutputSpec, Stmt, StridedLoop
+from emmy.compiler.ir.stmt.body import free_names
 
 # ``Body.structural_key()`` dispatches :func:`emmy.compiler.ir.stmt.passes.rewrite` over every
 # stmt for SSA / Expr / axis canonicalization. Register the structural node's handler here — an
@@ -784,8 +785,8 @@ class Fold:
             )
             owned.setdefault(key, []).append(spec)
         for spec in stores:
-            if spec.sweep is not None:
-                coordinates.setdefault(spec.sweep.name, spec.sweep)
+            for axis in spec.sweep:
+                coordinates.setdefault(axis.name, axis)
         declared.extend(name for name in coordinates if name not in declared)
         read = self.free_axes | {name for spec in stores for expr in spec.write.index for name in expr.free_vars()}
         if missing := read - bound - internal - set(coordinates):
@@ -813,15 +814,14 @@ class Fold:
 
         def attach(term: Fold, kind: str, target: list[Stmt], node: tuple[str, ...], scope: frozenset[str]) -> None:
             # The stores over what ``term`` defines as ``kind`` — its step's results, its carried
-            # state, or its observer's per-step values — land right after it, in ``target``, a
-            # store bounded on a shared output axis under its own bound (:meth:`OutputSpec.guarded`).
+            # state, or its observer's per-step values — land right after it, in ``target``.
             for spec in owned.get((id(term), kind), ()):
                 extra = {name for expr in spec.write.index for name in expr.free_vars()} - scope
                 if not extra:
-                    target.extend(spec.guarded((spec.write,)))
+                    target.append(spec.write)
                     continue
                 assert extra <= set(opened), f"a store reads coordinates {sorted(extra - set(opened))} no term declares and no sweep names"
-                sink((*node, *(name for name in opened if name in extra))).extend(spec.guarded((spec.write,)))
+                sink((*node, *(name for name in opened if name in extra))).append(spec.write)
 
         def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None) -> None:
             # ``loops``: the reduce loops enclosing this position, outermost first, as (axis, scope, stmts).
@@ -849,18 +849,57 @@ class Fold:
             target = stmts if stmts is not None else sink(node)
             if term.axis not in coordinates:
                 raise ValueError(f"lower: no extent for reduce axis {term.axis!r} — the kernel's axis table names it")
-            target.append(Loop(axis=coordinates[term.axis], body=Body(tuple(dict.fromkeys(inner)))))
+            target.append(_loop(coordinates[term.axis], _scope(inner)))
             attach(term, "state", target, node, scope)
 
         def assemble(path: tuple[str, ...]) -> Body:
             body = list(nest[path])
             for name in opened[opened.index(path[-1]) + 1 :] if path else opened:
                 if (*path, name) in nest:
-                    body.append(Loop(axis=coordinates[name], body=assemble((*path, name))))
-            return Body(tuple(dict.fromkeys(body)))
+                    body.append(_loop(coordinates[name], assemble((*path, name))))
+            return _scope(body)
 
         place(self, [], None)
         return assemble(())
+
+
+def _scope(stmts) -> Body:
+    """One scope's statements — a term reached through several operand positions defining its
+    names once, and sibling terms folding ONE coordinate iterating together.
+
+    The dedup is the shared-term rule. The FUSE is the same rule a level up: two loops over one
+    axis where neither reads what the other defines are two passes over one stream, and their
+    union is one pass — which is what puts a blocked carrier's expectation and its denominator in
+    one loop, computing the weight they both read once. A loop that DOES read the loop above it (a
+    statistic's pass, then the pass that normalizes by it) reads a FINISHED accumulator, and
+    iterating together would hand it the in-flight one; that pair stays two loops.
+    """
+    out: list[Stmt] = []
+    for stmt in dict.fromkeys(stmts):
+        prior = out[-1] if out else None
+        if (
+            isinstance(stmt, (Loop, StridedLoop))
+            and isinstance(prior, (Loop, StridedLoop))
+            and prior.is_reduce
+            and stmt.is_reduce
+            and replace(prior, body=stmt.body) == stmt
+            and not (free_names(stmt) & prior.body.ssa_defs)
+        ):
+            stmt = replace(prior, body=_scope((*prior.body, *stmt.body)))
+            out.pop()
+        out.append(stmt)
+    return Body(tuple(out))
+
+
+def _loop(axis: Axis, body: Body) -> Stmt:
+    """The iteration statement one coordinate renders as — strided when its axis strides.
+
+    A blocked stream's outer axis walks its parent in blocks, so the size lives on the axis and
+    never in the body's index arithmetic; ``StridedLoop`` is the statement that already says that.
+    """
+    if axis.step is None:
+        return Loop(axis=axis, body=body)
+    return StridedLoop(axis=axis, start=Literal(0, "int"), step=axis.step, body=body)
 
 
 @_rewrite_kind.register
@@ -885,26 +924,10 @@ def _(s: Fold, rename, sigma, axis_fn):
         mapped = sigma.get(name) if sigma is not None else None
         return mapped.name if isinstance(mapped, Var) else rename(name)
 
-    def _substituted(name: str) -> bool:
-        # A coordinate σ answers with an EXPRESSION rather than a variable — the shared output
-        # axis's clamp ``a1_1 → a1 % 32`` — binds nothing here any more: the body reads that
-        # expression's own coordinates instead.
-        mapped = sigma.get(name) if sigma is not None else None
-        return mapped is not None and not isinstance(mapped, Var)
-
-    arity = sum(len(edge.exposes) for edge in operands)
-    # Re-CLOSED, not re-wrapped: σ widens what the body reads, so the coordinates it introduced
-    # append as TRAILING params while the operand-correspondence prefix — the iteration var and one
-    # param per operand result component — stays exactly where every positional reading expects it.
-    # With no substituted coordinate the residual is empty and this is the plain rename it was.
-    lift = Lambda.closing(
-        (
-            *lead,
-            *(_param(name) for name in s.lift.params[len(lead) : len(lead) + arity]),
-            *(_param(name) for name in s.lift.params[len(lead) + arity :] if not _substituted(name)),
-        ),
-        Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
-        tuple(rename(r) for r in s.lift.results),
+    lift = Lambda(
+        params=(*lead, *(_param(p) for p in s.lift.params[len(lead) :])),
+        body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
+        results=tuple(rename(r) for r in s.lift.results),
     )
     combine = s.combine.rename(rename) if s.combine is not None else None
     observe = None

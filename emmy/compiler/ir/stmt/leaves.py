@@ -1053,26 +1053,15 @@ class OutputSpec:
     flag — holding the ``Write`` whole keeps every field lossless); ``TileOp.output_specs`` owns
     the tuple. The term places its stores itself (``Fold.lower``), each after the term defining
     its value; a stream spelled without the term reconstitutes them (``apply_output_specs``).
-    ``sweep`` names the output loop the store rode in the source: the axis a store alone is
-    evaluated over when no term declares it (a broadcast, ``o[j] = acc``), and the loop a stream
-    wraps around the trailing stmts reading it."""
+    ``sweep`` names the output loop NEST the store rode in the source, outermost first (``()`` is
+    a plain kernel-tail store): the axes a store alone is evaluated over when no term declares
+    them (a broadcast, ``o[j] = acc``), and the loops a stream wraps around the trailing stmts
+    reading them (``apply_output_specs`` — a prefix two paths share is one source loop, opened
+    once). The path is stored because it is the one fact extraction destroys: a write's index
+    names its coordinates, not the order its loops nested in the source (DeepSeek-V4 post4096's
+    gate stream nests two write-only sweeps beside the outer store). The term route takes only
+    the path's extents: ``Fold.lower`` places a store from its write's coordinates and orders the
+    free loops it opens itself."""
 
     write: Write
-    sweep: Axis | None = None
-    #: This region's OWN extent on a SHARED output axis — ``(axis name, exclusive bound)`` — or
-    #: ``None`` for a region spanning the axis. Sibling output regions of different widths ride one
-    #: axis, the widest, so the kernel's grid enumerates its output cells ONCE instead of their
-    #: cartesian product. The narrower region's cells past its own extent still compute (its reads
-    #: clamp, ``host % extent``); this bound is what keeps them from storing.
-    guard: tuple[str, int] | None = None
-
-    def guarded(self, stmts) -> tuple[Stmt, ...]:
-        """``stmts`` under this region's bound — the ONE spelling of a shared axis's store
-        predicate, so the term's own placement (``Fold.lower``) and the term-free stream
-        (``apply_output_specs``) reconstitute the same effect. Unbounded: ``stmts`` verbatim."""
-        if self.guard is None:
-            return tuple(stmts)
-        from emmy.compiler.ir.stmt.blocks import Cond  # noqa: PLC0415 — blocks imports this module
-
-        name, bound = self.guard
-        return (Cond(cond=BinaryExpr("<", Var(name), Literal(bound, "int")), body=tuple(stmts)),)
+    sweep: tuple[Axis, ...] = ()

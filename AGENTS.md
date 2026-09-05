@@ -2,6 +2,23 @@
 
 This file provides guidance to coding agents when working with code in this repository.
 
+## Communication
+
+Write to the user the way you would speak to them.
+
+- Short sentences. One idea per sentence.
+- Say the few things that matter most. Leave out the rest unless the user asks.
+- No file paths, symbol names, or code unless the user asks for them.
+- Simple technical English. Common words over rare ones.
+- Only established vocabulary: [`GLOSSARY.md`](GLOSSARY.md) terms, other standard repo or field terms, or plain
+  language. Never invent a label.
+- Answer first. Add background only when it changes what the user does next.
+- Disagree when you have reason to. Say what is wrong and what you would do instead. The goal is the right
+  answer, not agreement.
+- Raise a concern or change the direction of the conversation only when the stake is real: a wrong approach,
+  a risk, a much better option. Small things are not worth the interruption. Judge it the way one developer
+  would judge it when talking to another.
+
 ## Project Overview
 
 Emmy is a Python tool for deploying and benchmarking LLM inference on GPU servers. It supports vLLM and SGLang engines, provides a CLI for local and remote (SSH) deployment of models via Docker Compose, plus automated benchmarking across multiple servers.
@@ -49,8 +66,14 @@ get the same precedence. `config.py` is the source of truth for the full var lis
 
 ## Running Tests
 
+`make test` runs the whole suite. It takes many minutes, so **do not run it while developing** — run only the tests
+that cover the change, under a two-minute budget, and leave the full suite for the finalization stage (see
+Contribution Instructions).
+
 ```bash
-make test
+./venv/bin/pytest tests/test_storage.py -v                        # one file
+./venv/bin/pytest tests/compiler/passes/test_fusion_rules.py -k pointwise   # a few tests
+make test                                                        # the whole suite — finalization only
 ```
 
 `make test` compiles CUDA kernels at **`-Xcicc -O1`** — the **correctness lane**: `-O1` changes runtime perf, not
@@ -67,14 +90,11 @@ removed the cicc unroll blowup it rested on. The cold/warm gap also puts kernel 
 suite's wall time, so it is not the dominant cost either. Keeping `-O1` here buys ~12% cold; dropping it would leave
 one compile regime everywhere in the repo.
 
-Checked-in model goldens are not exercised by the per-commit test suite. The nightly `onboard-model` workflow owns
+Checked-in model goldens are not exercised by the default test suite. The nightly `onboard-model` workflow owns
 their repository validation, strict decode, and exact-GPU replay so model qualification stays with its GPU evidence.
-
-Or for a specific test file:
-
-```bash
-./venv/bin/pytest tests/test_recipe.py -v
-```
+The decode half alone is also reachable off the default lane, on any machine: `make test-goldens` strictly decodes
+every checked-in golden file (one case per file) against the current compiler, which is how you see a card's rows go
+green again after a tuning round re-records them.
 
 When running a large subset (e.g. `tests/compiler/`), pass the same `-n auto --dist=loadgroup` flags `make test` uses to
 parallelize (add `-p no:randomly` for a stable order):
@@ -167,11 +187,13 @@ Quick test models / scripts (for local iteration):
 ## Key Make Targets
 
 - `make setup` — create venv and install dependencies (includes ruff)
-- `make test` — run `pytest` using the venv (skips `perf`-marked tests; see the `tests/perf` architecture). Compiles
+- `make test` — run `pytest` using the venv (skips the off-lane `perf` / `goldens` tests). Compiles
   kernels at `-Xcicc -O1` (correctness lane, ~12% faster than `-O3` on a cold cache; perf tests use `-O3` via
   `make bench-kernels`)
 - `make test-corpus-regen` — restamp the realization corpus's derived half after a kernel-identity or schedule-codec
   change (`make test` detects the staleness on any machine; this applies the fix)
+- `make test-goldens` — strict-decode every checked-in golden against the current compiler (off the default lane,
+  no GPU needed; a stale row is detectable anywhere, re-recording it is what needs the card)
 - `make test-durations` — re-measure `tests/durations.json`, the checked-in per-test timings the suite balances its
   xdist workers on; commit the result when the balance has drifted
 - `make lint` — run `ruff check` and `ruff format --check`
@@ -208,9 +230,14 @@ markdown habit, and it is wrong for this repo. Aim for lines in the 90–120 ran
 Table rows, ASCII diagrams, and long URLs may overflow past 120 if wrapping would hurt readability — that's the only
 acceptable reason to go wider. Python code stays under 140 chars (Ruff-enforced).
 
+A pull-request or issue body is not a file in the repo: write it in unwrapped paragraphs and let GitHub wrap them.
+Manual line breaks there only make it harder to edit.
+
 ## Contribution Instructions
 
-IMPORTANT: You MUST follow ALL of these steps for EVERY code change. Do NOT skip any step.
+Two speeds. Development is fast: small test subsets, quick commits, no sweeps. Finalization is strict and runs
+once, at the end of the PR. Every step below is required for every code change, but each belongs to its own
+stage — do not pull finalization work into the edit loop, and do not skip it at the end.
 
 ### Writing code
 
@@ -231,47 +258,80 @@ code. It is fine to write code that processes structural data by selecting field
 or producing a CSV, TSV, or JSON table. Do not write scripts that interpret results or assemble human-readable
 reports; agents perform that reasoning and write the report.
 
-### Before committing (MANDATORY — do NOT skip these)
+### While developing — go fast
 
-You MUST complete ALL of the following checks before every commit. These are not optional:
+4. **Run only the tests that cover what you changed.** Name the test files or test ids. A directory sweep is not a
+   subset. The full suite takes many minutes; it belongs to finalization, not to the edit loop.
+5. **Hold a two-minute budget** for every test run or exploratory script you start yourself. If it does not finish in
+   two minutes, cut the scope: fewer tests, a smaller model, a smaller shape. A longer run needs a reason and the
+   user's agreement.
+6. **Commit as soon as the chosen subset is green.** Do not run the full suite, the linter, or the documentation pass
+   before a commit. Say in the commit message what you did not verify.
+7. **Open a draft PR with the first push.** Use `.github/PULL_REQUEST_TEMPLATE.md`; a title and a rough abstract
+   are enough at this point. Everything after that lands as more commits on the same PR.
 
-4. **Update `STYLE.md`** if any style changes were introduced — READ the current `STYLE.md` and compare
-5. **Update `README.md`** if project setup, structure, or usage patterns changed — READ the current `README.md` and compare
-6. **Update `AGENTS.md`** if general instructions are no longer accurate — READ this file and compare
-7. **Update `ARCHITECTURE.md`** files in every directory that was modified — READ each relevant `ARCHITECTURE.md` and compare
-8. **Prune `plans/`**: if the change executed/landed a plan, **delete that plan file**. Then enforce the cap — if
-   `plans/` holds more than 10 files, remove the executed/obsolete ones; if all remaining plans are still incomplete,
-   remove the oldest. Never add a `plans/*.md` reference to durable docs or code (see Documentation Conventions).
-9. **Check terminology**: review every text this change adds or edits — code comments, docstrings, docs, report
-   text, the commit message and PR body — against [`GLOSSARY.md`](GLOSSARY.md). Remove any invented terms and
-   replace them with the correct established term or a plain-word explanation (see Documentation Conventions).
-10. **Run tests**: `make test` — fix any failures before proceeding
-11. **Run linter**: `make lint` — if it fails, run `make format` and re-check
+### Finalization — once per PR (MANDATORY — do NOT skip these)
 
-### Before submitting (MANDATORY — do NOT skip these)
+Run this stage once, at the end, over the complete diff. It is the only place the full suite, the linter, and the
+documentation sweep belong. Do not spread these steps across the development commits.
 
-You MUST audit the complete diff after the before-committing checks and before requesting review:
+Audit the diff:
 
-12. **Remove unnecessary functionality**: Which new functionality can be removed?
-13. **Reuse existing mechanisms**: Which existing CLI, library, recipe, or skill can be reused instead?
-14. **Rethink touched functionality**: Can existing functionality be rearchitected around the PR's needs so one
+8. **Remove unnecessary functionality**: Which new functionality can be removed?
+9. **Reuse existing mechanisms**: Which existing CLI, library, recipe, or skill can be reused instead?
+10. **Rethink touched functionality**: Can existing functionality be rearchitected around the PR's needs so one
     simpler shared design replaces parallel or specialized paths?
-15. **Remove obsolete code**: Delete existing code that the PR makes unnecessary. Apply the boy-scout rule within the
+11. **Remove obsolete code**: Delete existing code that the PR makes unnecessary. Apply the boy-scout rule within the
     PR's scope and leave touched code cleaner, without expanding into an unrelated refactor.
-16. **Keep reasoning and reports out of code**: Which logic should become concise agent instructions? Code may
+12. **Keep reasoning and reports out of code**: Which logic should become concise agent instructions? Code may
     transform structural data, but scripts must not interpret results or assemble human-readable reports.
-17. **Minimize the diff**: Can the same outcome be achieved with fewer changed lines, files, flags, and abstractions?
-18. **Check the core line balance**: run `git diff --stat main -- emmy/`. A PR that introduces no new functionality
+13. **Minimize the diff**: Can the same outcome be achieved with fewer changed lines, files, flags, and abstractions?
+14. **Check the core line balance**: run `git diff --stat main -- emmy/`. A PR that introduces no new functionality
     (a refactor, a cleanup, a fix) must NOT increase the line count under `emmy/` — net growth there without new
     capability is the typical sign of architectural creep: another special case, helper, or early return layered onto
     a design that no longer fits. If the balance is positive, do not shave lines cosmetically to pass the check —
     restructure so the layering disappears, or say explicitly in the PR body why the growth is justified.
-19. **Apply the audit findings**: perform the removals and consolidation before requesting review. Tests must protect
-    the smaller contract, not preserve unnecessary machinery.
+15. **Apply the audit findings**: perform the removals and consolidation now, not after review. Tests must protect the
+    smaller contract, not preserve unnecessary machinery.
 
-### Submitting
+Then update the documentation:
 
-20. Push and open a PR
+16. **Update `STYLE.md`** if any style changes were introduced — READ the current `STYLE.md` and compare
+17. **Update `README.md`** if project setup, structure, or usage patterns changed — READ the current `README.md`
+    and compare
+18. **Update `AGENTS.md`** if general instructions are no longer accurate — READ this file and compare
+19. **Update `ARCHITECTURE.md`** files in every directory that was modified — READ each relevant
+    `ARCHITECTURE.md` and compare
+20. **Prune `plans/`**: if the change executed/landed a plan, **delete that plan file**. Then enforce the cap — if
+    `plans/` holds more than 10 files, remove the executed/obsolete ones; if all remaining plans are still incomplete,
+    remove the oldest. Never add a `plans/*.md` reference to durable docs or code (see Documentation Conventions).
+21. **Check terminology**: review every text this change adds or edits — code comments, docstrings, docs, report
+    text, the commit message and PR body — against [`GLOSSARY.md`](GLOSSARY.md). Remove any invented terms and
+    replace them with the correct established term or a plain-word explanation (see Documentation Conventions).
+
+Then run the gates, in this order, after every edit above is in:
+
+22. **Run the full suite**: `make test` — fix any failures. If a realization case comes back stale, `make
+    test-corpus-regen` applies the fix.
+23. **Run the linter**: `make lint` — if it fails, run `make format` and re-check
+24. **Decode the goldens** whenever the change touches the compiler (anything under `emmy/compiler/`, and always
+    for a schedule-codec, enumeration or knob-spelling change): `make test-goldens`. Off the default lane and needs no
+    GPU. `make test` guards the realization corpus against exactly this class of change and nothing guarded the
+    checked-in model goldens, so a rebuild of the schedule space can invalidate every recorded row in silence. If rows
+    go red, name the change that did it in the PR body — do **not** re-record them to make it green, which enshrines
+    the regression as the new reference.
+25. **Write the PR body** to `.github/PULL_REQUEST_TEMPLATE.md`. The title is a functional description readable
+    with no context. The abstract is one short plain-English paragraph — no bullets, no code references. One
+    optional artifact may follow it — a small table, a diagram, a few lines of output — when it carries the
+    claim better than the paragraph. Then a horizontal rule, then everything else — decisions, measurements,
+    what broke, what got slower, what was removed — under headings that fit the story. `Abstract` is the only
+    fixed heading.
+26. **Revise the PR body at least twice before posting.** Write it, then reread it as a reviewer with no
+    context, check it against the template and against the design philosophy below, cut, and repeat. A first
+    draft is always too long: it lists what was done instead of saying what the change is, and it keeps
+    sentences that no reviewer would miss. Stop when nothing else can come out without losing the point.
+27. **Mark the PR ready for review.** This is the last step. A draft PR that has not been through finalization
+    is not ready, whatever else is green.
 
 # Behavioral Guidelines:
 
@@ -316,7 +376,35 @@ When your changes create orphans:
 
 The test: Every changed line should trace directly to the user's request.
 
-## 4. Goal-Driven Execution
+**Exception — a major win.** If the change exposes a restructure that would make the design clearly simpler, say so.
+Do not do it silently and do not bury it: describe the win, say what it costs, and let the user decide. Staying
+surgical is the default, not a reason to keep quiet about a better shape.
+
+## 4. Design Quality Over Compatibility
+
+**A simpler design beats a compatible one.** Every artifact in Emmy can be regenerated — goldens, corpus cases, tune
+databases, priors, dumps. None of them is a reason to keep a worse design alive. Breaking a format, a name, or a
+stored file is cheap; carrying a second path forever is not.
+
+The measure of quality is the design itself: how few concepts it takes to explain, and how few lines the core under
+`emmy/` needs to carry it. Growth in the core without new capability is the warning sign — see the line-balance step
+in the Contribution Instructions.
+
+Dropping a feature is allowed too, when the feature is what forces the complexity. That call belongs to the user, not
+to you. Your job is to offer it: name the feature, name the simplification it buys, and wait.
+
+## 5. No Noise
+
+**Surface what matters, when it matters.** Which concerns are worth raising depends on the stage.
+
+- While prototyping or refactoring: broken paths, slower kernels, and a smaller feature set are fine. Keep working.
+  Do not stop to report them.
+- At finalization: every one of them has to be surfaced and written into the PR body — what broke, what got slower,
+  what was removed, and why.
+
+The same fact is noise in the middle of the work and required at the end. Judge by the stage.
+
+## 6. Goal-Driven Execution
 
 **Define success criteria. Loop until verified.**
 

@@ -227,7 +227,7 @@ def test_iteration_vars_are_not_captures() -> None:
         name="k_stat",
         place=Placement(free=(m, n), grid=(m,), mapped=True),
         axes=(m, n, K_STAT),
-        output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=n),),
+        output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=(n,)),),
     )
     # ``m`` comes from the placement, ``n`` from the output sweep — the sweep axis left the term
     # at 1q, so a dump reading only the term would wrongly call it captured.
@@ -280,7 +280,7 @@ def test_pretty_body_separates_placement_and_outputs_from_the_term() -> None:
         name="k_stat",
         place=Placement(free=(m, n), grid=(m,), mapped=True),
         axes=(m, n, K_STAT),
-        output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=n),),
+        output_specs=(OutputSpec(write=Write(output="y", index=(Var("m"), Var("n")), value="o"), sweep=(n,)),),
     )
     text = tile.pretty_body()
     assert "place  free=(m, n)  grid=(m)" in text

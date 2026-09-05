@@ -32,13 +32,13 @@ configs:
     - add_7
     - linear_6
   realizations:
-  - name: k_linear_0ac86e.4b5154dda667
+  - name: k_linear_6e0a29.80e94867d2bb
     bindings: {}
     pins:
       FAST_MATH: false
       PLACE: cut
     knobs: {}
-    identity: 711e9b149fc36e06ed778ffa509df941cf7eb32508131f9b5cb39af91cc45598
+    identity: ac7f15e1da83fc888de282bb2876faccaadf7775b19d27c3530eeeef1ffbb898
   - name: k_linear_0ac86e.4b5154dda667.2353a673153f
     bindings: {}
     pins:
@@ -58,3 +58,41 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: d7d5eced0b400748e32c96d54b7489debb7c99e076c901cfe3eefc63d59633d2
+  - name: k_linear_7c8076.07996d5afb89.033ef7c93cf9
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      RASTER: ''
+    identity: 033ef7c93cf9138dcce79cfb17d4bf690bd050351b0bc92ed3b5a240d36c66d2
+  - name: k_linear_7c8076.07996d5afb89.f9a8b6213ee4
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: f9a8b6213ee4cd71b0573393e913a03606ada9645f26e85d8474556e57235ad8
+  - name: k_linear_6e0a29.80e94867d2bb.7f7a3e6c23d9
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 7f7a3e6c23d95a4058de995f70e727bebb3b8c26b99a47560fb1e85c80ace912
+  - name: k_linear_6e0a29.80e94867d2bb.cb90d9b69d5c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      RASTER: ''
+    identity: cb90d9b69d5c91d6e931d162184681ccdfcce2f7560286174f8377a4ed2bb6d2

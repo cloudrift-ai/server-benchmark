@@ -542,14 +542,13 @@ class Pipeline:
           blocklist its tile and re-resolve, falling back to the next
           prior-ranked leaf. Bounded retries (each adds ≥1 block or
           stops).
-        * **Structural retirement** — a resolution that took a
-          *structural* pick (a prior-priced kernel-set change; the trace
-          contains a ``Graph`` decision) gets one coarser fallback
-          first: any lowering failure retires structural picks wholesale
-          (``price_structural=False``) and re-resolves down the
-          keep-fused branch, since a fragment kernel's failure can't be
-          blocklisted at the fork site (the splice minted fresh node
-          ids).
+        * **Structural retirement** — a refused row on a fragment
+          kernel blocklists at that piece's own schedule fork and the
+          composed route replays; only once no row of the piece binds
+          does a resolution that took a *structural* pick (the trace
+          contains a ``Graph`` decision) retire structural picks
+          wholesale (``price_structural=False``) and re-resolve down
+          the keep-fused branch.
 
         Retry orchestration, the ``rejections`` sink, and the loud
         :class:`LoweringError` on an un-lowered node are greedy search

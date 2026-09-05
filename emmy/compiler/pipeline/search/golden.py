@@ -773,7 +773,11 @@ def _target_kernel_nodes(record: GoldenRecord):
         provenance.seed(graph)
     lowered = Pipeline.build(LOOP_PASSES).run(graph, ctx=ctx)
     if record.loop_wire is not None:
-        nodes = [node for output in lowered.outputs if (node := lowered.producer(output)) is not None and isinstance(node.op, LoopOp)]
+        # One kernel per PRODUCER, not per output: a multi-output kernel (an NVFP4 re-encode emits
+        # packed codes beside their block scales) produces several of the graph's outputs, and
+        # counting it once per output made a single-kernel target read as "lowers to N kernels".
+        producers = (lowered.producer(output) for output in lowered.outputs)
+        nodes = list({node.id: node for node in producers if node is not None and isinstance(node.op, LoopOp)}.values())
     else:
         wanted = frozenset(record.origins)
         nodes = []
@@ -804,9 +808,13 @@ def _lifted_target(record: GoldenRecord):
     node.op = node.op.with_io(lowered, node)
     tile = lift_loop_op(node.op, name=node.id)
     tile = replace(tile, op=rewrite_twisted(tile.op, tile.axes))
-    # The live fork's root op has its io populated by the matcher; mirror it here so the dtype
-    # half of the identity (the deploy identity (``identity_key(with_io=True)``)) reads the same output fingerprint.
-    return replace(tile, outputs={node.output.name: node.output})
+    # A fork's root op is always matcher-refreshed (``_match_at`` runs ``with_io`` on every matched
+    # node before the rule that offers the fork), so the record side mirrors the io through that
+    # same call rather than a hand-rolled map: a multi-output kernel — an NVFP4 re-encode emits
+    # packed codes beside their block scales — is bound to every one of the node's output buffers,
+    # and the dtype half of the deploy identity (``identity_key(with_io=True)``) reads the same
+    # output fingerprint on both sides.
+    return tile.with_io(lowered, node)
 
 
 def decode_record(record: GoldenRecord, siblings: Sequence[GoldenRecord] = ()) -> str | None:

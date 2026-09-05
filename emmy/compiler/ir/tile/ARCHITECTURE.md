@@ -322,6 +322,12 @@ A computed edge injected into a twisted expectation is already the operand of th
 when placement materializes it. Its workspace therefore uses the consumer's public store dtype, not the producer's
 f32 reduction-carrier dtype; otherwise the materialized B slab would make every f16 tensor-core atom ineligible.
 
+The operand cones of a block-scaled packed pair are the one exception: they are not seams. That reading is a property
+of the cone, and it is what the packed-pair cell binds on — its codes and its block scale are already loads, and the
+cone only decodes them, so materializing it stores the decoded values and leaves the consumer with neither. Nothing
+reaches memory that was not there before, and every occurrence the seam stands for loses the cell. The contraction's
+own seam stays offered, which is the cut that gives a piece the output-axis pair a fragment needs.
+
 Scheduling sees only the rewritten stored Fold tree. Every Fold has one node site; the scheduler does not suppress a
 child because its parent may realize it. A derived unit-axis
 contraction inherits its enclosing Fold's reduction domain through the parent/child scheduling interface, while its

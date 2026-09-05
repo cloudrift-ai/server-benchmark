@@ -113,7 +113,17 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   local + one `full_attention` layer, the vocab shrinks to a stub) and traces the `pre`/`post` twins through the same
   `build_attention_split_wrapper` / `trace_split` path serving uses. Backs the file-scoped `emmy eval golden
   --golden GOLDEN_YAML --serving-config PATH` release audit and serving-image gate;
-  `scripts/capture_gen_twins.py` remains the full-checkpoint diagnostic capture.
+  `scripts/capture_gen_twins.py` is its JSON writer, one graph per file, because `emmy tune` reads a graph per file.
+  A CODED TRUNK is spelled by the checkpoint's own spellers, in the order `gen_runner._compile_split`'s stamp runs them:
+  the twin's wrapper-relative constant paths (`q_proj.weight`) are re-addressed to the representative layer's
+  checkpoint keys by dotted suffix, then `spell_quantized_constants` and — for a checkpoint declaring static 4-bit
+  input activations — `spell_static_fp4_activations` run over the checkpoint directory itself, yielding `…@nvfp4`.
+  Tuning evidence transfers to serving only while the twin's kernels have serving's identities, and one trace path
+  plus one spell sequence is what makes them equal. NVFP4 is the one format with no weight-free description: its
+  packed shapes live in the safetensors headers and its calibrated `input_scale` values in the shards, so
+  `loader.quant.nvfp4_checkpoint_dir` resolves the directory (consulting the loaded config first, so no other model
+  touches the hub for it). No rate multiplies these twins — one rate, one block size, and the representative layer is
+  the profile's lowest member.
   Coded routed experts are spelled weight-free so the golden records the program serving deploys, not the f16 GEMM
   the trace promised: EXL3 from the allocation sidecar (`…@b4`, one twin per rate profile), fp8 from the config's
   `quantization_config` alone (`loader.quant.fp8_weight_profile` — format token, `weight_block_size`, skip patterns;
@@ -379,6 +389,13 @@ checkpoint, tokenizer, and sentence-transformers pooling config still come from 
   checkpoint and keeps trunk linears on generic factorized contractions, never a dense weight. The coded output head
   invokes the same factorized spelling directly and stays compressed without a separate native path. Any unmatched
   coded trunk weight aborts compilation.
+
+  **NVFP4 trunk (W4A4).** A modelopt/NVFP4 checkpoint takes the same coded-trunk lane, and its stamp additionally
+  runs `spell_static_fp4_activations` (between the coded-weight and trellis spellers, `emmy compile`'s order): each
+  linear the checkpoint marks with a stored `input_scale` gets the declared activation quantize→dequantize written
+  into the pre/post graphs, so serving compiles the W4A4 program rather than 16-bit activations over packed
+  weights. vLLM never sees the scheme — `engine_config_overrides` nulls the quant config for NVFP4 declarations
+  (including modelopt MIXED_PRECISION with a 4-bit weight group) exactly as for EXL3/AWQ/MXFP4.
 
   **gpt-oss attention (sinks + SWA-128 + YaRN), all vLLM-side:** `EmmyGenModel` creates a per-layer `sinks`
   `nn.Parameter` (`[num_heads]`; keyed on `model_type == "gpt_oss"` — the config carries no flag) and passes

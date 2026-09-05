@@ -504,9 +504,10 @@ bucket** — the bucket-sized rider headroom is covered by the chunk+decode twin
 is rejected. Capacity is the dynamic-dim cap unless `EMMY_GEN_PREFILL_CAPACITY` pins it lower (the activation-arena
 lever for a card the weights nearly fill), and the default follows it down. `EMMY_SERVING_BATCHED=1`
 embedding serving defaults `--max-num-batched-tokens` to `max_num_seqs × max_model_len` so scheduler steps can fill
-the batch. A checkpoint whose compressed weights emmy's loader owns end to end (today: **EXL3**, trellis-coded) is
-additionally presented to vLLM as **unquantized** through the `--hf-overrides` — vLLM carries no method for the
-scheme and refuses the boot outright, while nothing in the engine needs one, since the runner owns every coded
+the batch. A checkpoint whose compressed weights emmy's loader owns end to end (**EXL3**, **AWQ**, **MXFP4** and **NVFP4**)
+is additionally presented to vLLM as **unquantized** through the `--hf-overrides` — either vLLM carries no method
+for the scheme and would refuse the boot outright, or it would stand up its own quantizer over weights the runner
+already reads coded; nothing in the engine needs one, since the runner owns every coded
 weight and the one vLLM-owned parameter (`lm_head`) decodes to fp16 at load. Which schemes those are is the loader
 band's call (`compiler/loader/quant.py::engine_config_overrides`), not the command layer's.
 

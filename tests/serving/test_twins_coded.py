@@ -4,9 +4,16 @@ These tests drive the spelling stage directly off a synthetic storage listing (n
 checkpoint, no transformers): the tracing stage is already covered by the drift gate, and what is
 new here is the pairing — which traced module gets which checkpoint entry, and how the per-tensor
 rate allocation multiplies the twins.
+
+The NVFP4 arm is the exception, and writes a real (tiny) checkpoint: that format has no weight-free
+description of itself, so its spelling reads stored shapes and calibrated activation scales off the
+directory rather than a listing.
 """
 
 from __future__ import annotations
+
+import json
+from pathlib import Path
 
 import pytest
 
@@ -535,3 +542,173 @@ def test_mxfp4_expert_twins_spell_native_blocks_and_scales():
 
     with pytest.raises(NotImplementedError, match=r"requires every routed-expert layer.*layer\(s\) \[1\]"):
         _spell_mxfp4_expert_twins("expert1", graph, ["model.layers.1.mlp.experts"], {0, 1}, True)
+
+
+def _nvfp4_checkpoint(path: Path) -> None:
+    """A tiny two-layer Qwen3 checkpoint whose every linear is stored as the NVFP4 packed trio,
+    with the per-linear ``input_scale`` that declares the activation half.
+
+    Written with the real quantizer rather than by hand: the twin arm reads stored shapes and
+    calibrated scale VALUES off this directory, so a fixture that only looked right in an index
+    would not exercise what the spellers do with it.
+    """
+    import numpy as np
+    import torch
+    import transformers
+    from safetensors.torch import save_file
+
+    from emmy.compiler.loader.quant import quantize_nvfp4
+    from emmy.compiler.loader.synthesize import _NVFP4_CONFIG
+
+    hidden, inter, heads, kv, head_dim, layers = 64, 128, 4, 2, 16, 2
+    config = transformers.Qwen3Config(
+        vocab_size=64,
+        hidden_size=hidden,
+        intermediate_size=inter,
+        num_hidden_layers=layers,
+        num_attention_heads=heads,
+        num_key_value_heads=kv,
+        head_dim=head_dim,
+        max_position_embeddings=64,
+    )
+    config.save_pretrained(path)
+    document = json.loads((path / "config.json").read_text())
+    document["quantization_config"] = _NVFP4_CONFIG
+    (path / "config.json").write_text(json.dumps(document, indent=1))
+
+    shapes = {
+        "self_attn.q_proj": (heads * head_dim, hidden),
+        "self_attn.k_proj": (kv * head_dim, hidden),
+        "self_attn.v_proj": (kv * head_dim, hidden),
+        "self_attn.o_proj": (hidden, heads * head_dim),
+        "mlp.gate_proj": (inter, hidden),
+        "mlp.up_proj": (inter, hidden),
+        "mlp.down_proj": (hidden, inter),
+    }
+    rng = np.random.default_rng(0)
+    tensors: dict[str, object] = {}
+    for layer in range(layers):
+        for module, (n, k) in shapes.items():
+            packed, scale_bits, scale_2 = quantize_nvfp4(rng.standard_normal((n, k), dtype=np.float32))
+            base = f"model.layers.{layer}.{module}"
+            tensors[f"{base}.weight"] = torch.from_numpy(packed)
+            tensors[f"{base}.weight_scale"] = torch.from_numpy(np.ascontiguousarray(scale_bits)).view(torch.float8_e4m3fn)
+            tensors[f"{base}.weight_scale_2"] = torch.from_numpy(scale_2)
+            # One calibrated activation level per linear, as modelopt writes it. ``q_proj``'s differs
+            # from ``k_proj`` / ``v_proj``'s so the twin exercises both halves of the sharing rule:
+            # equal levels over one activation share a single quantize, unequal ones get their own.
+            tensors[f"{base}.input_scale"] = torch.tensor([0.03 if module.startswith("self_attn.q") else 0.05], dtype=torch.float32)
+    save_file(tensors, str(path / "model.safetensors"))
+
+
+def _packed_weights(graph: Graph) -> dict[str, tuple[int, ...]]:
+    """``{checkpoint key: packed shape}`` for every NVFP4 weight constant the twin carries."""
+    return {
+        node.op.source_path: tuple(d.as_static() for d in node.output.shape)
+        for node in graph.nodes.values()
+        if isinstance(node.op, ConstantOp) and node.output.dtype.name == "f4e2m1x2"
+    }
+
+
+def test_nvfp4_serving_twins_carry_the_declared_w4a4_program(tmp_path):
+    """A twin of an NVFP4 checkpoint must record what serving compiles: packed weights AND the
+    static 4-bit activation encode the checkpoint's calibration declares. A float16 twin over
+    dequantized weights records a program serving never runs, and tuning it transfers nothing."""
+    pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    from emmy.serving.twins import capture_twin_graphs
+
+    _nvfp4_checkpoint(tmp_path)
+    graphs = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
+    assert set(graphs) == {"pre4@nvfp4", "post4@nvfp4"}
+
+    # The traced wrapper-relative paths are re-addressed to the representative layer's checkpoint
+    # keys, which is what lets the checkpoint-driven spellers fire at all.
+    assert _packed_weights(graphs["pre4@nvfp4"]) == {
+        "model.layers.0.self_attn.q_proj.weight": (64, 32),
+        "model.layers.0.self_attn.k_proj.weight": (32, 32),
+        "model.layers.0.self_attn.v_proj.weight": (32, 32),
+    }
+    assert set(_packed_weights(graphs["post4@nvfp4"])) == {
+        f"model.layers.0.{module}.weight" for module in ("self_attn.o_proj", "mlp.gate_proj", "mlp.up_proj", "mlp.down_proj")
+    }
+
+    for name, graph in graphs.items():
+        graph.validate()
+        encodes = [n for n in graph.nodes.values() if type(n.op).__name__ == "ElementwiseOp" and n.op.op.name == "to_f4e2m1"]
+        packed_activations = [n for n in graph.nodes.values() if n.output.dtype.name == "f4e2m1x2" and not isinstance(n.op, ConstantOp)]
+        assert encodes, f"{name}: no to_f4e2m1 encode — the twin still runs 16-bit activations over packed weights"
+        assert packed_activations, f"{name}: no packed f4e2m1x2 activation buffer"
+        # The capture's delivery form: `scripts/capture_gen_twins.py` writes one JSON per twin and
+        # `emmy tune` reads that file, so a packed twin that cannot round-trip is not tunable.
+        assert _structure(Graph.from_dict(json.loads(json.dumps(graph.to_dict())))) == _structure(graph)
+
+
+def test_nvfp4_twin_is_the_graph_serving_stamps(tmp_path):
+    """The transfer property, asserted directly: the captured twin and the graph
+    ``gen_runner._compile_split`` stamps on the same wrapper at the same width are the same graph.
+
+    Tuning evidence is keyed by kernel identity, so evidence recorded against the twin reaches
+    serving only while these two agree. They can only agree by construction — one trace path, one
+    re-addressing, one spell sequence — which is why the twin arm reuses all three rather than
+    reproducing the program from the checkpoint's declaration."""
+    torch = pytest.importorskip("torch")
+    pytest.importorskip("transformers")
+
+    import numpy as np
+    import transformers
+
+    from emmy.compiler.loader.quant import strip_engine_quant_config
+    from emmy.compiler.trace.huggingface import build_attention_split_wrapper
+    from emmy.serving.gen_runner import _compile_split
+    from emmy.serving.twins import capture_twin_graphs
+
+    _nvfp4_checkpoint(tmp_path)
+    twins = capture_twin_graphs(str(tmp_path), decode_bucket=4, prefill_bucket=0, symbolic=False)
+
+    config = transformers.AutoConfig.from_pretrained(tmp_path)
+    strip_engine_quant_config(config)
+    with torch.device("meta"):
+        trunk = transformers.AutoModel.from_config(config, dtype=torch.float16).eval()
+    pre_w, post_w = build_attention_split_wrapper(trunk.layers[0])
+    pre_w.to_empty(device="cpu").to(torch.float16)
+    post_w.to_empty(device="cpu").to(torch.float16)
+    # What the runner threads as ``ckpt``: the checkpoint dir plus parameter identity → its key.
+    id_to_key = {id(t): f"model.{path}" for path, t in trunk.named_parameters(remove_duplicate=False)}
+
+    class _Stamped(Exception):
+        def __init__(self, graph):
+            self.graph = graph
+
+    class _CaptureBackend:
+        def __init__(self, **_kwargs):
+            pass
+
+        def compile(self, graph):
+            raise _Stamped(graph)
+
+    hidden, attn_width = config.hidden_size, config.num_attention_heads * config.head_dim
+    examples = {
+        "pre": [torch.zeros(4, hidden, dtype=torch.float16)],
+        "post": [torch.zeros(4, attn_width, dtype=torch.float16), torch.zeros(4, hidden, dtype=torch.float16)],
+    }
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr("emmy.compiler.backend.cuda.backend.CudaBackend", _CaptureBackend)
+        for half, wrapper in (("pre", pre_w), ("post", post_w)):
+            with pytest.raises(_Stamped) as caught:
+                _compile_split(wrapper, examples[half], None, np.dtype("float16"), ckpt=(str(tmp_path), id_to_key))
+            assert _structure(caught.value.graph) == _structure(twins[f"{half}4@nvfp4"])
+
+
+def _structure(graph: Graph):
+    """A graph's node structure, ignoring the values behind it: every node's op kind, operands,
+    output dtype and output shape, plus the program's own input/output lists."""
+    return (
+        list(graph.inputs),
+        list(graph.outputs),
+        {
+            nid: (type(node.op).__name__, tuple(node.inputs), node.output.dtype.name, tuple(str(d) for d in node.output.shape))
+            for nid, node in graph.nodes.items()
+        },
+    )

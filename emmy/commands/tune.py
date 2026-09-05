@@ -187,13 +187,16 @@ def _tune_backend(device_id: int | None = None):
     with the worker and the **parent** CUDA stream stays clean. Tight per-variant
     budgets: 12 s compile (measured headroom — the slowest kernel in a 4,888-compile sweep of
     this inventory needed 1.4 s, and the budget also covers cubin load, buffer alloc and TMA
-    descriptor prebuild, which that sweep did not measure); 2 s run is ample. A config that
+    descriptor prebuild, which that sweep did not measure); the 2 s run default is ample for a
+    kernel near its floor, and ``EMMY_BENCH_RUN_TIMEOUT_S`` raises it for a target whose whole
+    reachable range sits above 2 s (a scalar-tier fused linear would otherwise record only
+    ``bench_fail``, never a number). A config that
     overruns the compile budget is REPORTED, not recorded (see ``CompileBudgetExceeded``), which
     is why the wall must not pre-empt it. ``device_id`` pins the async bench worker to a physical
     GPU (multi-GPU tune)."""
     from emmy.compiler.backend.cuda.backend import CudaBackend
 
-    compile_s, run_s = 12.0, 2.0
+    compile_s, run_s = 12.0, config.bench_run_timeout_s(2.0)
     # The wall cap must sit ABOVE the in-child budgets, not beside them (the same formula the
     # pinned path uses). A wall that can fire first silently converts the two honest in-child
     # verdicts into one SIGKILL: a compile that overran is checked only when it RETURNS, so under

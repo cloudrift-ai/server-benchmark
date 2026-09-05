@@ -22,6 +22,7 @@ from emmy.compiler.ir.pure.fold import (
     Fold,
 )
 from emmy.compiler.ir.pure.lam import Lambda
+from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import carries_partition, edge_dtypes
@@ -211,9 +212,10 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
     """Every semantically closed stored Fold edge whose workspace dtypes are determined, grouped
     only by object sharing. A contraction's operand edges are seams too — cutting one materializes
     the cone feeding the operand into its own kernel and the contraction reads it back as an
-    ordinary load — and they take the explicit contraction-operand dtype rule (`_workspace_dtypes`).
-    A seam is offered only where the cone is closed at the axes of every occurrence; a term is
-    closed by construction, so that gate names a malformed tree rather than a capture to resolve."""
+    ordinary load — and they take the explicit contraction-operand dtype rule (`_workspace_dtypes`),
+    except on a block-scaled packed pair, whose operand cones are not seams at all. A seam is
+    offered only where the cone is closed at the axes of every occurrence; a term is closed by
+    construction, so that check names a malformed tree rather than a capture to resolve."""
     all_sites = sites(tile.op)
     store_dtype_consumers = {
         id(edge): site.node
@@ -243,6 +245,15 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
             # separate the scan from its streamed boundary store, which no piece can then spell.
             continue
         consumer = store_dtype_consumers.get(id(node))
+        if consumer is not None and match_packed_pair_node(consumer, tile.inputs) is not None:
+            # An operand cone of a BLOCK-SCALED packed pair reaches gmem already: its codes and
+            # its block scale are loads, and the cone only decodes them. Materializing it stores
+            # the decoded values instead, so the consumer holds neither the codes nor the
+            # per-block scale the cell multiplies — the reading is gone for every occurrence the
+            # seam covers, and no piece can put it back. Nothing is hoisted either way, so this
+            # is not a placement trade. The contraction's OWN seam stays offered, and that is the
+            # cut that gives the piece the output-axis pair a fragment needs.
+            continue
         # A frontier REPLACES the fed-store realization at this seam rather than joining the
         # offer: the raw bits dominate the fed-store workspace on both precision (exact vs
         # re-rounded) and footprint (storage width vs store width), so there is no trade for the
@@ -402,6 +413,23 @@ def output_map(root: Node) -> dict[str, str]:
     return {name: f"{name}__placed" for name in root.buffer_names()}
 
 
+def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
+    """The SSA name a workspace read binds: the cone's own result name, tagged with the seam whose
+    workspace it now comes from (and, for a clustered duplicate, its ordinal in the cluster).
+
+    A lowered body reads PRODUCER names throughout — a consumer's params are spelled as the result
+    names of the edge they bind (:attr:`~emmy.compiler.ir.pure.fold.Fold.applied`) — so an edge's
+    result name is what the emitted kernel declares, and the cone's own name is NOT unique among
+    what one kernel binds. The value a cut materializes can still be computed in place beside the
+    read: a structurally equal cone the replacement did not reach (replacement follows object
+    sharing), or a second seam exposing that same value. Under one name those are two declarations
+    at two different addresses, which is an SSA fault and which nvcc rejects (*already declared in
+    the current scope*). Reads of ONE workspace at one address keep one name, so the emitted body
+    still binds each value once.
+    """
+    return f"{name}__ws{token}" if ordinal is None else f"{name}__ws{token}s{ordinal}"
+
+
 def _producer_order(pieces) -> list:
     """Topologically order cut producers by the workspaces their stored Fold reads.
 
@@ -446,6 +474,13 @@ def realize(
     tile: TileOp = root.op
     split_consumed = tile.split_consumed or carries_partition(tile)
     pieces = []
+    # What each replaced cone's result is called once the consumer reads it back — the ONE
+    # rename this pass mints, collected as it is minted. A term's readers follow it for free (a
+    # consumer's params are spelled as the result names of the edge they bind), but the kernel's
+    # boundary stores are NOT part of the term: ``TileOp.output_specs`` names the stored value as
+    # a plain string, so a store of a cut cone's own result has to be re-spelled here or it names
+    # a value the consumer no longer defines.
+    read_names: dict[str, str] = {}
     for seam in seams:
         child = seam.node
         front = seam.frontier
@@ -462,22 +497,37 @@ def realize(
 
         # SLABS, not bare Loads: these replace an operand edge, and an operand is a term. The
         # workspace read declares the seam axes it indexes, exactly as any other gmem read does.
-        loads = tuple(Fold.slab(Load(name=name, input=buffer, index=index)) for name, buffer in zip(names, buffers, strict=True))
+        loads = tuple(
+            Fold.slab(Load(name=_read_name(name, token), input=buffer, index=index)) for name, buffer in zip(names, buffers, strict=True)
+        )
         if front is not None:
             # The raw storage read at the frontier's dtype stays INLINE under its decode residue —
             # the storage-decode cone the operand readers recognize (a raw ``b8`` fill), not a
-            # projection over a slab.
+            # projection over a slab. The residue is a lambda over that read, so tagging what it
+            # EXPOSES renames its defining statements in lockstep and leaves the read's own
+            # internal spelling alone.
             raw = Load(name=names[0], input=buffers[0], index=index, dtype=front.dtype)
-            loads = (Fold(operands=(), lift=Lambda.closing((), Body.coerce(Body((raw, *front.residue))), child.lift.results)),)
+            residue = Lambda.closing((), Body.coerce(Body((raw, *front.residue))), child.lift.results)
+            loads = (Fold(operands=(), lift=residue.rename({name: _read_name(name, token) for name in residue.results})),)
+        # The names the consumer reads this workspace back under. A frontier seam's workspace holds
+        # the raw storage waypoint, so its piece is named after the FRONTIER while the consumer
+        # still exposes the cone's decoded results — the rename is over those.
+        read_names.update({name: _read_name(name, token) for name in (names if front is None else child.lift.results)})
         replacements = {id(child): loads}
-        for sibling, pairs in seam.siblings:
+        for ordinal, (sibling, pairs) in enumerate(seam.siblings):
             # A clustered duplicate reads the SAME workspace, spelled through its own captured
-            # axes via the correspondence the clustering proved.
+            # axes via the correspondence the clustering proved — and under its own read names,
+            # since it reads that workspace at a DIFFERENT address than the representative.
             mapping = dict(pairs)
             sibling_index = tuple(Var(mapping[axis.name]) for axis in axes)
             replacements[id(sibling)] = tuple(
-                Fold.slab(Load(name=name, input=buffer, index=sibling_index)) for name, buffer in zip(sibling.exposes, buffers, strict=True)
+                Fold.slab(Load(name=_read_name(name, token, ordinal), input=buffer, index=sibling_index))
+                for name, buffer in zip(sibling.exposes, buffers, strict=True)
             )
+            # The representative wins a shared name: a boundary store of a value both occurrences
+            # expose reads the term's own, and only the representative sits on the term's path.
+            for name in sibling.exposes:
+                read_names.setdefault(name, _read_name(name, token, ordinal))
         pieces.append((seam, produced, axes, index, token, names, buffers, replacements))
 
     # Every replacement applies to the consumer AND to every OTHER seam's produced piece: a
@@ -523,7 +573,14 @@ def realize(
         )
 
     parent_stores = tuple(
-        replace(store, write=replace(store.write, output=renamed_outputs.get(store.write.output, store.write.output)))
+        replace(
+            store,
+            write=replace(
+                store.write,
+                output=renamed_outputs.get(store.write.output, store.write.output),
+                values=tuple(read_names.get(value, value) for value in store.write.values),
+            ),
+        )
         for store in tile.output_specs
     )
     consumer = TileOp(

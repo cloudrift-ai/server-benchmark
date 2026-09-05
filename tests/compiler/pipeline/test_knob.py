@@ -641,6 +641,13 @@ def test_complete_kernel_row_requires_the_emitted_exact_schedule():
     assert "S_ext_free_prod" not in out
     assert complete_kernel_row(out) == out
 
+    # A kernel with neither a contraction nor a reduction site carries no TILE and no REDUCE key,
+    # so its canonical row IS ``WORK`` and ``RASTER`` alone and records as it stands. A placement
+    # cut mints exactly this shape: the copy-shaped piece it splits off, and the leftover root it
+    # leaves behind once the cut takes the contraction away.
+    site_less = {"WORK": "t256", "RASTER": ""}
+    assert complete_kernel_row(site_less) == site_less
+
     with pytest.raises(ValueError, match="missing RASTER"):
         complete_kernel_row({"WORK": "", "REDUCE": ""})
     with pytest.raises(ValueError, match="not canonical"):

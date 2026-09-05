@@ -245,14 +245,20 @@ def _warp_epilogue(
     # select, or an earlier op) — an unbound name means the variant's projection tail reads a
     # value this node does not compute (a mis-sliced multi-channel combine: the gemma GeGLU
     # tail on a single-fold row referenced the sibling channel's ``acc2`` and died with a
-    # ``KeyError`` in the RegStore render). Decline the variant cleanly instead.
+    # ``KeyError`` in the RegStore render). Decline the variant cleanly instead — as a REJECTING
+    # skip, like the materializer's ``UnbindableProjection`` decline: this is the node's lowering
+    # refusing the offered row, and a decline the greedy retry cannot see leaves the node a
+    # ``TileOp`` in a compile that reports success, surfacing as ``plan_from_graph``'s
+    # "non-CudaOp 'TileOp'" at deploy.
     from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
     bound = {acc, *(a for a, _ in extra_accs), *(ld.name for ld in loads), *(nm for nm, _ in selects)}
     for name, _op, args, _dtype in ops:
         unbound = [a for a in args if a not in bound]
         if unbound:
-            raise RuleSkipped(f"projection epilogue reads {unbound} this node does not compute (mis-sliced multi-channel tail)")
+            raise RuleSkipped(
+                f"projection epilogue reads {unbound} this node does not compute (mis-sliced multi-channel tail)", reject=True
+            )
         bound.add(name)
     return RegEpilogue(acc=acc, loads=tuple(loads), ops=tuple(ops), result=write.value, selects=tuple(selects), extra_accs=extra_accs)
 
@@ -1092,10 +1098,17 @@ def _packed_operands(
 
     def scale_value(k0, row, col):
         k = BinaryExpr("+", k0, BinaryExpr("*", col, Literal(block, "int")))
-        # Hygienic like the compute fill's own substitution above: nothing in a block-scale factor
-        # cone re-binds these names today, but the safe spelling costs nothing and the cone is
-        # whatever the speller wrote.
-        sigma = Sigma({n.axis.name: n_coord(row), k_axis.name: k})
+        # The slab is CTA-shared across the m rows, so the factor cone's VALUE is m-invariant — but
+        # m can still appear SYNTACTICALLY: a placement cut materializes the weight's per-tensor
+        # scale into a workspace indexed by the kernel's outer free axes, and the cone reads it back
+        # as ``ws[m]``. The kernel decodes only the tile's ``m_b`` / ``m_u`` split vars, so leaving m
+        # free emits an undefined identifier (nvfp4 Qwen3-8B's M=1 v_proj: ``identifier "_um" is
+        # undefined``, the elided unit row being the tiled m side). Bind it to the sibling block base
+        # like every other staged fill, under which an m-invariant read evaluates unchanged.
+        # The substitution is hygienic like the compute fill's own above: nothing in a block-scale
+        # factor cone re-binds these names today, but the safe spelling costs nothing and the cone
+        # is whatever the speller wrote.
+        sigma = Sigma({n.axis.name: n_coord(row), k_axis.name: k, **_sibling_sigma(m)})
         return [s.substitute(sigma) for s in factor_cone], packed.factor
 
     scale_op = SyncOperand(tag="bs", shape=(n.tile, bk_elems // block), value=scale_value)
@@ -1870,7 +1883,11 @@ class _MmaOps(_AtomOps):
                     )
                 ]
             cell = offset[0].base(i)
-            idx = tuple(Sigma({m.axis.name: cell}).apply(e) for e in a_load.index)
+            # The sibling n axis binds too (:func:`_sibling_sigma`): the fragment is shared across
+            # the row, so the read is n-invariant in VALUE, but n can still appear SYNTACTICALLY —
+            # a split-K partition writes its ksplit coordinate into A's k index, and when the pair
+            # places that ksplit on n the bare axis name no longer exists after the tile split.
+            idx = tuple(Sigma({m.axis.name: cell, **_sibling_sigma(n)}).apply(e) for e in a_load.index)
             return [
                 LdmatrixLoad(
                     frag=self.frag(f"_a{i}"),
@@ -1903,7 +1920,7 @@ class _MmaOps(_AtomOps):
                     )
                 ]
             cell = offset[1].base(j)
-            idx = tuple(Sigma({n.axis.name: cell}).apply(e) for e in b_load.index)
+            idx = tuple(Sigma({n.axis.name: cell, **_sibling_sigma(m)}).apply(e) for e in b_load.index)
             return [
                 LdmatrixLoad(
                     frag=self.frag(f"_b{j}"),
@@ -1963,6 +1980,15 @@ class _MmaOps(_AtomOps):
         frags = (self.frag(f"_c{i}_{j}"), *(_fold_frag(self.frag(f"_c{i}_{j}"), f) for f in range(1, len(chans))))
         writes = [s for s in tail if isinstance(s, Write)]
         body = Body(tail)
+        if len(body.writes) != len(writes):
+            from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
+
+            # A boundary store this sink cannot reach: it folds the tail's TOP-LEVEL writes into
+            # per-cell ``RegStore``\\s, whose only predicate is the fragment's own M/N overhang, so a
+            # write nested under a block — a sibling output nest's serial sweep ``Loop``, a ``Cond``
+            # — has no cell to become. Declining the ROW says so; dropping the write would emit a
+            # kernel that silently never stores that output.
+            raise RuleSkipped("a boundary write nested under a block has no fragment cell to store from", reject=True)
         out = []
         for write in writes:
             cone = body.backward_cone((write.value,))
@@ -1970,7 +1996,16 @@ class _MmaOps(_AtomOps):
             if not used:
                 from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
-                raise RuleSkipped(f"fragment projection for {write.output!r} reads no contraction accumulator")
+                # This row's lowering DECLINING the offered schedule, not a benign skip: the kernel
+                # writes an output this contraction does not produce, which no ``(m, n)`` cell of it
+                # can store. ``reject=True`` records it in the run's rejection list so the greedy
+                # blocklist retires the row; as a plain skip nothing was recorded and the search
+                # re-derived the same dead candidate on every visit (every NVFP4 post-attention
+                # re-encode candidate, 12 of 12).
+                raise RuleSkipped(
+                    f"fragment projection for {write.output!r} reads no contraction accumulator",
+                    reject=True,
+                )
             primary = used[0]
             extra = tuple((accs[f], frags[f]) for f in used[1:])
             epi = _warp_epilogue([*cone.members, write], accs[primary], m.axis.name, n.axis.name, sigma, extra_accs=extra)

@@ -18,6 +18,7 @@ from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.stmt import Assign, Load, Write
+from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
 from emmy.compiler.loop_wire import loop_graph_to_wire
 from emmy.compiler.pipeline import CUDA_PASSES, LOOP_PASSES, TILE_PASSES, Match, Pipeline, Rule
@@ -35,6 +36,7 @@ from emmy.compiler.pipeline.search.golden import (
     GoldenRecord,
     _lifted_target,
     _replay,
+    _target_kernel_nodes,
     decode_record,
     kernel_identity,
     validate_golden_file,
@@ -292,6 +294,14 @@ def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None
     assert decode_record(GoldenRecord(knobs={"PLACE@map.1/twist.1/inner": "cut"}, **fields)) is None
     reason = decode_record(GoldenRecord(knobs={"PLACE@missing": "cut"}, **fields))
     assert reason is not None and "does not resolve" in reason
+    # A route that resolves SOME of its seams is refused the same way. Evidence import is
+    # best-effort per record — it keeps the arms the replay did resolve — so the strict decode is
+    # the one place a record that would deploy a shorter kernel set than the measured one is loud.
+    # The stale seam here is well formed and stands on no site of this tree: one hop past the score
+    # contraction, where the operand is a gmem slab and takes no hop of its own.
+    partial_route = {"PLACE@map.1/twist.1/inner": "cut", "PLACE@map.1/twist.1/inner.1/map": "cut"}
+    partial = decode_record(GoldenRecord(knobs=partial_route, **fields))
+    assert partial is not None and "does not resolve" in partial
 
 
 @requires_cuda
@@ -494,6 +504,40 @@ def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
     ]
 
 
+def test_multi_output_kernel_record_derives_the_identity_its_live_fork_carries() -> None:
+    """A record whose one target kernel writes SEVERAL output buffers must derive the identity its
+    live fork carries. Every evidence row a golden contributes is keyed by that identity, so a
+    derivation that kept only output slot 0 keys the record's rows off a fingerprint no fork can
+    produce and the deploy reads none of them. The derivation lifts the persisted kernel and the
+    fork root op is whatever the matcher's ``with_io`` produced — a map holding every output slot,
+    which is why the lift goes through the same call."""
+    graph = Graph()
+    _input(graph, "x", (8,))
+    graph.add_node(ElementwiseOp("relu"), ["x"], Tensor("hot", (8,), "f16"), node_id="hot")
+    graph.add_node(ElementwiseOp("negative"), ["hot"], Tensor("cold", (8,), "f16"), node_id="cold")
+    graph.inputs, graph.outputs = ["x"], ["hot", "cold"]
+    loop = Pipeline.build(LOOP_PASSES).run(graph.copy(), ctx=_CTX)
+    fields = {
+        **_receipt_fields(),
+        "name": "fused.multi_output",
+        "pins": (),
+        "program_wire": graph_to_wire(graph),
+        "origins": (),
+        "loop_index": 0,
+        "loop_wire": loop_graph_to_wire(loop),
+    }
+    record = GoldenRecord(knobs={}, **fields)
+    _lowered, nodes = _target_kernel_nodes(record)
+    assert len(nodes) == 1 and len(nodes[0].outputs) == 2, "the fused target must be ONE kernel writing two buffers"
+
+    identity = kernel_identity(record)
+    rows = _replay(record, exhaustive=True).rows
+    assert identity in rows, "the derived identity names no kernel the live resolve offers"
+    # The join is the subject; spelling one of that kernel's own rows shows the record decodes
+    # strictly through it too.
+    assert decode_record(GoldenRecord(knobs=dict(next(iter(rows[identity]))), **fields)) is None
+
+
 def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -> None:
     from types import SimpleNamespace
 
@@ -541,6 +585,108 @@ def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
 
     unpinned = GoldenRecord(knobs={}, **{**fields, "pins": ()})
     assert unpinned.pool_group != a.pool_group, "the pin regime is a group-key term"
+
+
+# ---------------------------------------------------------------------------
+# The routing lane: a recorded ROUTING row decides a placement fork.
+# ---------------------------------------------------------------------------
+
+#: A card in the ``emmy.gpu`` registry, so the record's context reconstructs without a live device.
+_ROUTING_CARD = "NVIDIA GeForce RTX 5090"
+
+
+def _sdpa_kernel_identity() -> str:
+    """The deploy identity carried by the sdpa program's PLACEMENT fork — the PRE-CUT kernel, which
+    is the kernel a routing row names: the route it records is the one decision taken on that
+    kernel, before any piece of it exists. Probed off a resolve rather than restated here, so these
+    tests pin the routing lane and not a second copy of the identity derivation."""
+    from emmy.compiler.pipeline.fork import flatten_leaves
+
+    ctx = Context.from_target((12, 0), gpu_name=_ROUTING_CARD)
+    lowered = Pipeline.build(LOOP_PASSES).run(_sdpa_graph(False), ctx=ctx)
+    seen: list[str] = []
+
+    def decide(fp):
+        if not seen and isinstance(fp.root_op, TileOp) and fp.match.rule.name == _CUT.__name__.rsplit(".", 1)[-1]:
+            seen.append(fp.root_op.identity_key(with_io=True))
+        return flatten_leaves(fp.options)[0]
+
+    Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(lowered, decide)
+    assert seen, "the sdpa program must offer a placement fork"
+    return seen[0]
+
+
+def _routing_record(knobs: dict, *, name: str = "sdpa.route") -> GoldenRecord:
+    """A measured ROUTING row over the sdpa kernel — nothing but ``PLACE`` keys, which is what
+    makes it a recorded placement rather than a recorded schedule. The identity is stored so this
+    exercises the routing LANE and not the record-side identity derivation, which has its own
+    tests."""
+    return GoldenRecord(
+        name=name,
+        gpu_name=_ROUTING_CARD,
+        compute_cap=(12, 0),
+        model=None,
+        program_index=0,
+        program_wire=graph_to_wire(_sdpa_graph(False)),
+        origins=("out",),
+        bindings=(),
+        pins=(),
+        knobs=knobs,
+        identity=_sdpa_kernel_identity(),
+        measurements={"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"},
+        ranking=None,
+    )
+
+
+def _deploy_kernels(records: list) -> list[str]:
+    """Resolve the sdpa program through the deploy policy with ``records`` as the card's corpus,
+    and return the resolved kernel set. ``prior=None`` pins the non-recorded forks to emission
+    order, so the recorded evidence is the only thing that can move the answer. The records are
+    evidence in any nvcc regime: a golden row is scoped by the card and by its own input pins
+    (``regime_live``), never by the optimization level the suite compiles at."""
+    from emmy.compiler.pipeline.search.golden import records_override
+    from emmy.compiler.pipeline.search.policy.greedy import greedy_decide
+
+    ctx = Context.from_target((12, 0), gpu_name=_ROUTING_CARD)
+    lowered = Pipeline.build(LOOP_PASSES).run(_sdpa_graph(False), ctx=ctx)
+    with records_override(records):
+        terminal, _trace = Run(pipeline=Pipeline.build(TILE_PASSES), ctx=ctx).resolve(lowered, greedy_decide(prior=None))
+    return sorted(node.id for node in terminal.nodes.values() if isinstance(node.op, TileOp))
+
+
+#: The root-most of the sdpa kernel's offered seams, as the route codec spells it: the twist that
+#: carries the softmax statistics.
+_SDPA_ROUTE = "PLACE@map.1/twist"
+
+
+def test_a_recorded_kernel_set_deploys_the_cut_every_entry_spells() -> None:
+    """A cut mints brand-new kernels, so a kernel set cut twice over is recorded per kernel and not
+    as one row spelling both seams: the leading entry spells the seam offered on the target's own
+    kernel, and an entry naming a piece by its stored identity spells the seam that piece offers on
+    its own tree. Each entry's route is a row under the signature of the kernel whose fork it
+    decided, so the deploy composes the whole recorded set — the parent's entry alone deploys only
+    the parent's seam."""
+    fused = _deploy_kernels([])
+    assert len(fused) == 1, f"with no recorded route the fork falls to emission order (fuse): {fused}"
+
+    parent = _routing_record({_SDPA_ROUTE: "cut"})
+    routed = _deploy_kernels([parent])
+    assert sum(1 for name in routed if "__place_" in name) == 1, f"the parent's entry deploys its one seam: {routed}"
+
+    pieces = [
+        replace(parent, name=f"sdpa.piece{i}", knobs={"PLACE": "cut"}, identity=identity)
+        for i, identity in enumerate(sorted(_replay(parent).kernels))
+    ]
+    composed = _deploy_kernels([parent, *pieces])
+    assert sum(1 for name in composed if "__place_" in name) >= 2, f"every recorded seam must be cut: {composed}"
+
+
+def test_a_recorded_schedule_row_never_routes() -> None:
+    """The lanes do not cross: a schedule row carries no ``PLACE`` key, so it is not a route and
+    the placement fork stays with pricing even though the row joins the same kernel identity."""
+    schedule_row = _routing_record({"WORK": "w4x1", "TILE": ""}, name="sdpa.schedule")
+    assert not schedule_row.is_routing
+    assert _deploy_kernels([schedule_row]) == _deploy_kernels([])
 
 
 def _cone_seam() -> CutSite:

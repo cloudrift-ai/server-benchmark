@@ -236,6 +236,122 @@ def test_create_keeps_storage_coded_trunks_packed(tmp_path, monkeypatch, quant_m
     assert seen["kwargs"]["expert_store"] is fake_store
 
 
+class _StampedGraph(Exception):
+    """Carries the graph out of ``_compile_split`` at the backend seam — the last point where the
+    loader's spellings are all in, and the first that would need a GPU."""
+
+    def __init__(self, graph):
+        super().__init__("captured the stamped split graph")
+        self.graph = graph
+
+
+def test_compile_split_spells_static_fp4_activations_for_a_marked_nvfp4_checkpoint(tmp_path, monkeypatch):
+    """A checkpoint declaring static 4-bit input activations must reach serving's split programs as
+    the declared W4A4 algebra: a ``to_f4e2m1`` encode ahead of the marked linear and a packed
+    ``f4e2m1x2`` activation buffer beside the packed weight. ``emmy compile`` runs the activation
+    speller after the weight speller; serving's stamp inside ``_compile_split`` must do the same,
+    or the coded trunk computes 4-bit weights against 16-bit activations — the W4A16 scaffolding,
+    which is a different program from the one the checkpoint declares.
+
+    The graph is captured at the CUDA backend seam, so nothing here compiles or runs a kernel."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.compiler.loader.synthesize import write_quantized_checkpoint
+    from emmy.serving.gen_runner import _compile_split, trace_split
+
+    class _Split(torch.nn.Module):
+        """One marked linear — the shape a serving split's ``pre`` carries per projection."""
+
+        def __init__(self, hidden, inner):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(hidden, inner, bias=False)
+
+        def forward(self, x):
+            return self.q_proj(x)
+
+    wrapper = _Split(64, 32)
+    example = (torch.randn(8, 64),)
+    ckpt = write_quantized_checkpoint(trace_split(wrapper, example, None), (wrapper, example, {}), tmp_path / "ckpt")
+    # What the runner threads as ``ckpt``: the checkpoint dir plus parameter identity → its key.
+    id_to_key = {id(wrapper.q_proj.weight): "l0.weight"}
+
+    class _CaptureBackend:
+        def __init__(self, **_kwargs):
+            pass
+
+        def compile(self, graph):
+            raise _StampedGraph(graph)
+
+    monkeypatch.setattr("emmy.compiler.backend.cuda.backend.CudaBackend", _CaptureBackend)
+    with pytest.raises(_StampedGraph) as caught:
+        _compile_split(wrapper, list(example), None, np.dtype("float32"), ckpt=(str(ckpt), id_to_key))
+    graph = caught.value.graph
+
+    packed_weights = [n for n in graph.nodes.values() if n.output.dtype.name == "f4e2m1x2" and type(n.op).__name__ == "ConstantOp"]
+    assert packed_weights, "the weight speller never fired — the fixture is not a marked NVFP4 checkpoint"
+
+    encodes = [n for n in graph.nodes.values() if type(n.op).__name__ == "ElementwiseOp" and n.op.name == "to_f4e2m1"]
+    packed_activations = [n for n in graph.nodes.values() if n.output.dtype.name == "f4e2m1x2" and n not in packed_weights]
+    assert encodes, "no to_f4e2m1 encode ahead of the marked linear: serving still runs 16-bit activations"
+    assert packed_activations, "no packed f4e2m1x2 activation buffer: only the weight side is spelled"
+
+
+def test_compile_split_spells_static_fp4_activations_on_a_symbolic_width_split(tmp_path, monkeypatch):
+    """The same W4A4 stamp on the tier serving compiles for every non-bucket width: the symbolic
+    program, whose token axis is a ``num_tokens`` Var rather than a static extent.
+
+    NVFP4 packs along the LAST (feature) axis — two codes per byte over K, one block scale per 16
+    elements of K — and K comes from the weight, so every dim the packing arithmetic divides is
+    static. The token axis only rides along, through elementwise ops, a gather and leading-axis
+    reshapes. A speller that resolves the WHOLE shape to ints therefore raises on a graph it could
+    have spelled, and every layer's symbolic program takes the runner's engine init down with
+    it."""
+    torch = pytest.importorskip("torch")
+
+    from emmy.compiler.loader.synthesize import write_quantized_checkpoint
+    from emmy.serving.gen_runner import _compile_split, trace_split
+
+    class _Split(torch.nn.Module):
+        def __init__(self, hidden, inner):
+            super().__init__()
+            self.q_proj = torch.nn.Linear(hidden, inner, bias=False)
+
+        def forward(self, x):
+            return self.q_proj(x)
+
+    wrapper = _Split(64, 32)
+    example = (torch.randn(8, 64),)
+    ckpt = write_quantized_checkpoint(trace_split(wrapper, example, None), (wrapper, example, {}), tmp_path / "ckpt")
+    id_to_key = {id(wrapper.q_proj.weight): "l0.weight"}
+
+    class _CaptureBackend:
+        def __init__(self, **_kwargs):
+            pass
+
+        def compile(self, graph):
+            raise _StampedGraph(graph)
+
+    monkeypatch.setattr("emmy.compiler.backend.cuda.backend.CudaBackend", _CaptureBackend)
+    with pytest.raises(_StampedGraph) as caught:
+        # ``["x"]`` ties the forward arg's axis 0 to the shared symbolic ``num_tokens`` Dim, and
+        # ``capacity`` sizes the build feed — exactly how the runner builds its ``*.sym`` tier.
+        _compile_split(wrapper, list(example), ["x"], np.dtype("float32"), capacity=64, ckpt=(str(ckpt), id_to_key))
+    graph = caught.value.graph
+
+    assert not graph.buffer(graph.inputs[0]).shape[0].is_static, "the fixture traced static — not the symbolic tier"
+
+    packed_weights = [n for n in graph.nodes.values() if n.output.dtype.name == "f4e2m1x2" and type(n.op).__name__ == "ConstantOp"]
+    assert packed_weights, "the weight speller never fired — the fixture is not a marked NVFP4 checkpoint"
+
+    encodes = [n for n in graph.nodes.values() if type(n.op).__name__ == "ElementwiseOp" and n.op.name == "to_f4e2m1"]
+    packed_activations = [n for n in graph.nodes.values() if n.output.dtype.name == "f4e2m1x2" and n not in packed_weights]
+    assert encodes, "no to_f4e2m1 encode ahead of the marked linear: the symbolic tier still runs 16-bit activations"
+    assert packed_activations, "no packed f4e2m1x2 activation buffer: only the weight side is spelled"
+    assert any(not d.is_static for n in packed_activations for d in n.output.shape), (
+        "the packed activation lost its symbolic token axis — the tier would only serve one width"
+    )
+
+
 def test_create_passes_the_expert_shard_through_to_the_loader(tmp_path, monkeypatch):
     """A tensor-parallel rank's expert shard must reach the checkpoint read, not just the routing:
     holding every expert is what does not fit the card in the first place."""

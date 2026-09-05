@@ -213,7 +213,11 @@ def rewrite(ctx: Context, graph: Graph, match: Match) -> Graph | Op | list[Graph
   Pattern names from `PATTERN` bind to their matched `Node` objects. Anything else binds positionally to
   `root.inputs[i]`. Take only what you need — `ctx` is optional.
 - Files starting with `_` (e.g. `_broadcast.py`) are **not** loaded as rules — they're shared helpers.
-- Raise `RuleSkipped(reason)` to decline a match; the engine logs the reason at DEBUG and moves on.
+- Raise `RuleSkipped(reason)` to decline a match; the engine logs the reason at DEBUG and moves on. Add
+  `reject=True` when the decline is a **lowering** refusing the offered row rather than a pass legitimately passing
+  the node on: that records into the `rejections` sink below, so the report a stranded node raises can name the pass
+  and the reason it declined. Without it the node still stops the compile — what counts as stranded is read off the
+  terminal graph, not off the sink — but the report can only name the op the node is stuck on.
 - A rule module may declare `FIXPOINT = True`. After every successful rewrite the cursor stays on that rule; only a
   quiescent match batch advances. `030_cut` uses this so every fresh kernel finishes structural cuts before scheduling.
 
@@ -360,12 +364,21 @@ Verified by `tests/compiler/passes/test_knob_stamp_invariant.py`.
 
 A rewrite that *returns* an op failing `Op.validate(ctx)` — e.g. a `KernelOp` whose smem exceeds
 `ctx.max_dynamic_smem` — is dropped by `Candidate.try_rewrite`. Dropping it is right during a search, where sibling
-branches carry other tile shapes, but fatal in a single-path greedy compile, where it leaves the node un-lowered. So:
+branches carry other tile shapes, but fatal in a single-path greedy compile, where it leaves the node un-lowered. The
+same holds for a rewrite that *declines* the row (`RuleSkipped`) and for a node no rule matched: the node reaches the
+terminal with its pre-final op either way. So:
 
-- `Pipeline.run` installs a `rejections` sink on the `Run`, recording each drop as `(node, pass, reason)`. After the
-  terminal settles, `_raise_on_unlowered` raises a loud `LoweringError` naming any still-un-lowered node, instead of
-  leaking a cryptic `non-CudaOp` `TypeError` to the backend.
-- The sink is absent under `tune`, so dropping options during a search stays silent there.
+- **The settled terminal is the evidence, not the sink.** A pipeline whose last pass is `lowering/cuda`
+  (`Pipeline.lowers_to_cuda`) promised a graph of `CudaOp`, so any node still holding a `LoopOp` / `TileOp` once the
+  resolution settles is stranded — whether or not a rule recorded anything. That set is what drives the greedy
+  retries and what `_raise_on_unlowered` raises the loud `LoweringError` on, instead of leaking a cryptic
+  `non-CudaOp` `TypeError` to the backend. Reading the sink alone missed every strand nothing records — a
+  materializer declining a row with an ordinary `RuleSkipped`, or no rule matching the node at all — and those
+  compiles returned a half-lowered graph and reported success. A truncated pipeline (`TILE_PASSES`, `LOOP_PASSES`)
+  terminates in an earlier dialect by design, so there only a node with a recorded rejection counts.
+- `Pipeline.run` installs a `rejections` sink on the `Run`, recording each drop as `(node, pass, reason)`. It does not
+  decide what is stranded; it supplies the pass and reason the error names. The sink is absent under `tune`, so
+  dropping options during a search stays silent there.
 
 A rewrite that *raises* mid-lowering — a deterministic pass hitting an un-representable shape — is the same dead end
 expressed as an exception. Greedy `resolve` lets it propagate. Under `tune`, `Run.drive` catches it per-candidate,
@@ -851,8 +864,8 @@ the first in-budget one), the strategy takes one last **emission-order resolve**
 (`greedy_decide(blocked=…, prior=None)`): its point is that it ignores the prior whose extrapolation caused the
 overflow, and the blocklist rides along so this last resolve can never re-pick a tile that already
 failed `validate(ctx)`. It is a validity fallback, not a quality one — it makes no claim about the speed of what it
-lands on, and the enumeration promises it no particular leaf. When that leaf overflows too, `_raise_on_unlowered`
-fires the loud `LoweringError`.
+lands on, and the enumeration promises it no particular leaf. When that leaf leaves the node un-lowered too,
+`_raise_on_unlowered` fires the loud `LoweringError`.
 
 ### `Pipeline.tune_async` — the autotune sweep
 

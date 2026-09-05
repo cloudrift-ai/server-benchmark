@@ -769,7 +769,15 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         return tuple(support for support in frontier if self._support_refusal(site, support) is None)
 
     def _validate_stage_restriction(self) -> None:
-        """Keep an addressed non-direct STAGE restriction authoritative and diagnostic."""
+        """Keep an addressed non-direct STAGE restriction authoritative and diagnostic.
+
+        The two "does not resolve" raises are local verdicts about THIS contraction, so they are
+        skipped under the same flag that makes an unsupported global pin a refusal rather than an
+        error (``validate_pins=False`` — a row published across the peer kernels of a multi-kernel
+        target, which is what an MCTS candidate and a corpus case behind a placement cut both do).
+        A pin the sibling kernel cannot stage is not that row's kernel, and the caller's contract
+        is that some kernel realizes it, not every one. The TARGET refusal below stays loud either
+        way: a spelling the card cannot run is wrong wherever it is published."""
         assert self._pins is not None and self._restricted_nodes is not None and self._restricted_edges is not None
         if not self.tile_op.stage_edges:
             return
@@ -781,8 +789,10 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             choice = Stage.parse(spelling)
             if why := stage_target(choice, self.target):
                 raise ValueError(why)
-            if key == "STAGE" and not self._supports_global("STAGE", spelling):
+            if key == "STAGE" and not self._supports_global("STAGE", spelling) and not self._ignore_unsupported_global:
                 raise ValueError(f"STAGE pin {spelling!r} does not resolve for this contraction")
+        if self._ignore_unsupported_global:
+            return
         for site in self.tile_op.node_sites:
             keys = tuple(dict.fromkeys(self.stage_key(edge) for edge in self.incident_edges(site) if edge in self.tile_op.stage_edges))
             pins = tuple(pin for key in keys for pin in self._applicable_pins("STAGE", key) if pin)

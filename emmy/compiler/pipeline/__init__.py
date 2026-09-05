@@ -23,6 +23,7 @@
 
 from emmy.compiler.pipeline.dump import CompilerDump
 from emmy.compiler.pipeline.pipeline import (
+    FINAL_LOWERING_PASS,
     LoweringError,
     Match,
     Pass,
@@ -44,12 +45,13 @@ TENSOR_PASSES = ["frontend/decomposition", "frontend/optimization"]
 LOOP_PASSES = [*TENSOR_PASSES, "loop/lifting", "loop/fusion", "loop/canonicalize", "loop/stamp"]
 TILE_PASSES = [*LOOP_PASSES, "lowering/tile"]
 KERNEL_PASSES = [*TILE_PASSES, "lowering/kernel"]
-CUDA_PASSES = [*KERNEL_PASSES, "lowering/cuda"]
+CUDA_PASSES = [*KERNEL_PASSES, FINAL_LOWERING_PASS]
 
 __all__ = [
     "CUDA_PASSES",
     "Candidate",
     "CompilerDump",
+    "FINAL_LOWERING_PASS",
     "KERNEL_PASSES",
     "LOOP_PASSES",
     "LoweringError",

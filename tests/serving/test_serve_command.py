@@ -419,6 +419,17 @@ def test_serve_cmd_generate_nulls_the_quantization_config_for_exl3(tmp_path, mon
     assert json.loads(cmd[cmd.index("--hf-overrides") + 1]) == {"architectures": ["EmmyGenModel"]}
 
 
+def test_serve_cmd_generate_nulls_the_quantization_config_for_nvfp4(tmp_path):
+    """Same ownership rule for a modelopt/NVFP4 checkpoint (the nvidia/* shape): emmy's loader
+    reads the packed weight / block scale / global scale trio itself, so vLLM must be handed an
+    unquantized twin rather than left to stand up its own NVFP4 quantizer beside it."""
+    quant_config = {"quant_method": "modelopt", "quant_algo": "NVFP4", "ignore": ["lm_head"]}
+    cfg = {"model_type": "llama", "architectures": ["LlamaForCausalLM"], "quantization_config": quant_config}
+    (tmp_path / "config.json").write_text(json.dumps(cfg))
+    cmd = build_serve_cmd(str(tmp_path), stock=False, vllm_args=[], generate=True)
+    assert json.loads(cmd[cmd.index("--hf-overrides") + 1]) == {"architectures": ["EmmyGenModel"], "quantization_config": None}
+
+
 def test_serve_cmd_generate_honors_explicit_batched_tokens():
     cmd = build_serve_cmd(MODEL, stock=False, vllm_args=["--max-num-batched-tokens", "2048"], generate=True)
     assert cmd.count("--max-num-batched-tokens") == 1  # the user's, no added default

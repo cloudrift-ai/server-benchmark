@@ -12,11 +12,20 @@ _EXPR_TAGS = {"var", "literal", "binary", "builtin", "call", "ternary", "cast"}
 _NAMED_SHAPE_OPS = {"torch.reshape", "torch.slice"}
 
 
-def _specialize_expr(value: Mapping, bindings: Mapping[str, int]) -> dict:
+def _specialize_expr(value: Mapping, bindings: Mapping[str, int], *, extent: bool = False) -> dict:
+    """Bind the named dimensions inside one wire expression and simplify what that fixes.
+
+    ``extent`` says the expression IS a dimension, so every name still free in it is a
+    tensor extent and simplification may use the one fact an extent carries: it is at
+    least 1. Every other expression indexes a tensor rather than sizing one, and its free
+    names are output coordinates and loop variables that start at 0 — reading those as
+    extents folds a real predicate away (an IndexMap's ``out_coord_1 < 1`` becomes false,
+    silently dropping that source), so they simplify with no range at all.
+    """
     expr = expr_from_wire(dict(value))
     replacements = {name: Literal(size, "int") for name, size in bindings.items()}
     specialized = expr.substitute(replacements)
-    ranges = {name: Interval(1, 1 << 30) for name in specialized.free_vars()}
+    ranges = {name: Interval(1, 1 << 30) for name in specialized.free_vars()} if extent else {}
     return expr_to_wire(specialized.simplify(SimplifyCtx(ranges)))
 
 
@@ -28,7 +37,7 @@ def _specialize_dim(value, bindings: Mapping[str, int]):
     if "sym" in value and set(value) <= {"sym", "hint"}:
         return bindings.get(value["sym"], dict(value))
     if "expr" in value and set(value) <= {"expr", "hint"}:
-        expr = _specialize_expr(value["expr"], bindings)
+        expr = _specialize_expr(value["expr"], bindings, extent=True)
         if set(expr) == {"literal"} and expr["literal"].get("dtype") == "int":
             return int(expr["literal"]["value"])
         result = {"expr": expr}

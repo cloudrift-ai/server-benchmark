@@ -241,8 +241,8 @@ def _fp8_quant_config(model_dir: Path) -> dict | None:
     return None
 
 
-def _fp4_quant_config(model_dir: Path) -> dict | None:
-    """The checkpoint's ``quantization_config`` when it quantizes ANY weights to NVFP4.
+def _declares_nvfp4_weights(qc: dict) -> bool:
+    """Whether a ``quantization_config`` MAPPING quantizes ANY weights to NVFP4.
 
     Three conventions in the wild: ``quant_method: "modelopt"`` with ``quant_algo: "NVFP4"``
     (TensorRT Model Optimizer — the nvidia/* checkpoints); the same method at
@@ -250,7 +250,21 @@ def _fp4_quant_config(model_dir: Path) -> dict | None:
     ``quant_method: "compressed-tensors"`` (llm-compressor) whose ``config_groups`` quantize
     weights as 4-bit float over 16-element groups (the ``nvfp4-pack-quantized`` format). The
     group-size condition keeps 32-element-block 4-bit families (MXFP4) out — same e2m1
-    values, different scale dtype and block. Anything else → ``None``.
+    values, different scale dtype and block.
+
+    Split from :func:`_fp4_quant_config` for the callers holding the declaration already —
+    a serving engine's HF config carries it, and never a checkpoint directory to read.
+    """
+    method = qc.get("quant_method")
+    if method == "modelopt":
+        algo = qc.get("quant_algo")
+        return algo == "NVFP4" or (algo == "MIXED_PRECISION" and _quantizes_weights_at(qc, 4, 16))
+    return method == "compressed-tensors" and _quantizes_weights_at(qc, 4, 16)
+
+
+def _fp4_quant_config(model_dir: Path) -> dict | None:
+    """The checkpoint's ``quantization_config`` when it quantizes ANY weights to NVFP4
+    (:func:`_declares_nvfp4_weights` names the declarations that count), else ``None``.
 
     A MIXED_PRECISION checkpoint answers BOTH this and :func:`_fp8_quant_config`, by design:
     nvidia/Qwen3.6-27B-NVFP4 puts its attention and delta-net projections in fp8 and its MLP and
@@ -258,17 +272,7 @@ def _fp4_quant_config(model_dir: Path) -> dict | None:
     siblings are its own. The two recognizers still decline each other's PURE checkpoints.
     """
     qc = _quantization_config(model_dir)
-    if qc is None:
-        return None
-    method = qc.get("quant_method")
-    if method == "modelopt":
-        algo = qc.get("quant_algo")
-        if algo == "NVFP4":
-            return qc
-        return qc if algo == "MIXED_PRECISION" and _quantizes_weights_at(qc, 4, 16) else None
-    if method == "compressed-tensors":
-        return qc if _quantizes_weights_at(qc, 4, 16) else None
-    return None
+    return qc if qc is not None and _declares_nvfp4_weights(qc) else None
 
 
 def _mxfp4_quant_config(model_dir: Path) -> dict | None:
@@ -399,6 +403,32 @@ def is_nvfp4_checkpoint(model_dir) -> bool:
     return _fp4_quant_config(Path(model_dir)) is not None
 
 
+def nvfp4_checkpoint_dir(model_id_or_path: str, hf_config=None, *, revision: str | None = None) -> Path | None:
+    """The local directory of a checkpoint declaring NVFP4 weights, or ``None`` for any other
+    scheme — :func:`is_nvfp4_checkpoint`'s answer plus the directory the answer is about.
+
+    The NVFP4 counterpart of :func:`~emmy.compiler.loader.exl3.coded_tensor_storage`, and it hands
+    back a directory rather than a weight-free allocation listing because this format has no such
+    description: the packed shapes live in the safetensors headers, and the activation half's
+    calibrated ``input_scale`` values live in the shards. A twin that wants the deployed program
+    therefore reads the same checkpoint the deployed program reads.
+
+    ``hf_config`` is an already-loaded transformers config, consulted to confirm the scheme before
+    any fetch, so a caller holding a config never touches the hub for an ordinary model. Omit it
+    and the checkpoint's own ``config.json`` decides (local paths only).
+    """
+    from emmy.compiler.loader.safetensors import _resolve_model_dir  # noqa: PLC0415
+
+    if hf_config is None:
+        return Path(model_id_or_path) if is_nvfp4_checkpoint(model_id_or_path) else None
+    qc = getattr(hf_config, "quantization_config", None)
+    if qc is None:
+        return None
+    if not isinstance(qc, dict):
+        qc = {key: getattr(qc, key, None) for key in ("quant_method", "quant_algo", "config_groups")}
+    return _resolve_model_dir(model_id_or_path, revision) if _declares_nvfp4_weights(qc) else None
+
+
 def is_exl3_checkpoint(model_dir) -> bool:
     """Whether the checkpoint declares the EXL3 scheme.
 
@@ -472,13 +502,17 @@ def engine_config_overrides(hf_config) -> dict:
     loader already owns. ``{}`` for an ordinary checkpoint (and for ``None``, the caller's
     "config unreadable").
 
-    EXL3, AWQ and MXFP4 are owned by Emmy's loader and compiler. Presenting their shape-only
-    architecture twin as unquantized prevents the engine from rejecting an otherwise supported
-    device or trying to allocate a second decoded expert table. This lives in the loader band
-    because naming a checkpoint scheme is frontend-band knowledge."""
+    EXL3, AWQ, MXFP4 and NVFP4 are owned by Emmy's loader and compiler. Presenting their
+    shape-only architecture twin as unquantized prevents the engine from rejecting an otherwise
+    supported device, standing up a second quantizer over weights the loader already reads, or
+    trying to allocate a second decoded expert table. NVFP4 is recognized by the declaration
+    itself (:func:`_declares_nvfp4_weights`), not by ``quant_method`` alone: modelopt spells
+    fp8 checkpoints the same way, and those stay the engine's to own. This lives in the loader
+    band because naming a checkpoint scheme is frontend-band knowledge."""
     scheme = getattr(hf_config, "quantization_config", None)
     method = scheme.get("quant_method") if isinstance(scheme, dict) else getattr(scheme, "quant_method", None)
-    return {"quantization_config": None} if method in {"exl3", "awq", "mxfp4"} else {}
+    owned = method in {"exl3", "awq", "mxfp4"} or (isinstance(scheme, dict) and _declares_nvfp4_weights(scheme))
+    return {"quantization_config": None} if owned else {}
 
 
 def strip_engine_quant_config(hf_config) -> None:
@@ -868,7 +902,7 @@ def _f4_pair_table(graph: Graph, *, name: str, out_name: str, dtype) -> str:
         pairs_t = tg.add_node(op=ElementwiseOp(op="copy"), inputs=[pairs_t], output=Tensor("pairs_cast", (256, 2), dtype))
     tg.outputs = [pairs_t]
     return graph.add_node(
-        op=ConstantOp(name=name, source_graph=tg, source_shape=(256, 2), source_dtype=dtype),
+        op=ConstantOp(name=name, source_graph=tg, source_shape=(256, 2), source_dtype=dtype.name),
         inputs=[],
         output=Tensor(out_name, (256, 2), dtype),
     )
@@ -1521,6 +1555,20 @@ def _cone_has_fp4_encode(graph: Graph, start: str) -> bool:
     return any(isinstance(n.op, ElementwiseOp) and n.op.op.name == "to_f4e2m1" for n in _cone_nodes(graph, start))
 
 
+def _shape_extents(shape) -> tuple[int | str, ...]:
+    """A buffer's shape as the ``int | str`` extents an op's shape field takes — static dims as
+    ints, symbolic ones by name.
+
+    NVFP4 packs along the LAST axis only: two codes per byte over K, one block scale per 16
+    elements of K. Both halves of the round trip below therefore do real int arithmetic on the
+    last extent — the pair pack's ``k // 2``, the block split's ``k // 16``. That extent is always
+    an int: K comes from the packed weight. Every LEADING axis just rides along through the
+    elementwise / gather / reshape chain, so it may be the serving trace's symbolic ``num_tokens``
+    and has to survive as such: resolving those too raises on the any-width program serving
+    compiles beside its static token buckets."""
+    return tuple(d.as_static() if d.is_static else str(d) for d in shape)
+
+
 def _spell_static_fp4_quantize(
     graph: Graph, activation: str, scale_key: str, s2_shape: tuple[int, ...]
 ) -> tuple[str, str, str, str] | None:
@@ -1557,7 +1605,7 @@ def _spell_static_fp4_quantize(
     if not kd.is_static or kd.as_static() % NVFP4_BLOCK or int(np.prod(s2_shape) if s2_shape else 1) != 1:
         return None
     k = kd.as_static()
-    lead = tuple(d.as_static() if d.is_static else str(d) for d in source.shape[:-1])
+    lead = _shape_extents(source.shape[:-1])
     blocked = (*lead, k // NVFP4_BLOCK, NVFP4_BLOCK)
     bshape = (*lead, k // NVFP4_BLOCK, 1)
     flat, half = (*lead, k), (*lead, k // 2)
@@ -1638,8 +1686,8 @@ def _spell_static_fp4_decode(graph: Graph, quant: tuple[str, str, str, str], dty
     from emmy.compiler.tensor import Tensor  # noqa: PLC0415
 
     quant_stem, bits, sbits, s2 = quant
-    half = tuple(d.as_static() for d in graph.buffer(bits).shape)
-    bshape = tuple(d.as_static() for d in graph.buffer(sbits).shape)
+    half = _shape_extents(graph.buffer(bits).shape)
+    bshape = _shape_extents(graph.buffer(sbits).shape)
     flat, blocked = (*half[:-1], half[-1] * 2), (*bshape[:-1], NVFP4_BLOCK)
     # A reconstruction's own stem, never the quantize half's: the two spell some of the same
     # derived names (``_scale_vals``, ``_fused``), and ``add_node`` answers a taken name by

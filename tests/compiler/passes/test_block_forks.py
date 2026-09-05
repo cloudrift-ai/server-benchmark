@@ -49,6 +49,11 @@ import torch.nn.functional as F
 q = torch.randn(1, 4, 128, 32, dtype=torch.float16)
 F.scaled_dot_product_attention(q, q.clone(), q.clone())
 """
+_CAUSAL_SDPA = """
+import torch.nn.functional as F
+q = torch.randn(1, 4, 128, 32, dtype=torch.float16)
+F.scaled_dot_product_attention(q, q.clone(), q.clone(), is_causal=True)
+"""
 
 
 def _tile(code: str, blocked: bool = True) -> TileOp:
@@ -64,6 +69,20 @@ def _tile(code: str, blocked: bool = True) -> TileOp:
 
 def _site(tile: TileOp, path: str) -> int:
     return next(index for index in range(len(tile.sites)) if tile.sites[index].path == path)
+
+
+def _terms(term):
+    """``term`` and every term below it."""
+    yield term
+    for edge in term.operands:
+        yield from _terms(edge)
+
+
+def _coordinates(body) -> set[str]:
+    """The coordinate names one lift body reads — a mask predicate's comparands, a load index's
+    vars. Coordinates, not values: a value arrives through a param, an expression reads a name the
+    binder around it has to supply."""
+    return {name for stmt in body for expr in stmt.exprs() for name in expr.free_vars()}
 
 
 # ---- which carriers are blocked ---------------------------------------------------------------- #
@@ -103,6 +122,27 @@ def test_the_channels_share_one_binder_and_one_weight() -> None:
     assert pivot.axis != expectation.axis
     assert expectation.axis == denominator.axis
     assert expectation.operands[0] is denominator.operands[0]
+
+
+def test_a_lift_body_reading_the_blocked_axis_reads_the_block_pair() -> None:
+    """The block's σ reaches a lift BODY, not just the operand edges it feeds.
+
+    A causal mask compares the key coordinate against the query's inside the lift, so it reads the
+    stream's coordinate directly rather than through a slab. After blocking, the kernel has no such
+    coordinate to bind — it walks the block pair — and each level walks its own half: the pivot's
+    pass and the channels' are separate loops, so each mask has to read the binder of the loop it
+    lives in.
+    """
+    tile = _tile(_CAUSAL_SDPA)
+    outer = tile.sites[_site(tile, "map.1/twist")].node
+    pivot, expectation, denominator = (edge for edge in outer.operands if edge.axis is not None)
+    weight = expectation.operands[0]
+    assert weight is denominator.operands[0]
+    split = {axis.window.parent.name for axis in tile.axes if axis.window is not None and axis.window.block}
+    assert len(split) == 1
+    assert not split & {name for term in _terms(tile.op) for name in _coordinates(term.lift.body)}
+    assert {outer.axis, pivot.axis} <= _coordinates(pivot.lift.body)
+    assert {outer.axis, expectation.axis} <= _coordinates(weight.lift.body)
 
 
 # ---- the width is the form's -------------------------------------------------------------------- #

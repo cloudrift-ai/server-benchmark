@@ -482,6 +482,10 @@ def seeded_inputs(program) -> dict[str, np.ndarray]:
     symbolic reproducer to. The corpus therefore exercises a symbolic kernel at its hint; it has no
     spelling for "compile at the hint, run at some other size", because binding a symbol in a case
     file SPECIALIZES the program rather than sizing a run of it.
+
+    An input is a BUFFER name, not a node id: a Loop target's slice boundary mirrors every buffer of
+    the producer it stands in for, and a multi-buffer producer (an NVFP4 encode, which emits packed
+    codes beside their block scales) names its second buffer after the tensor rather than the node.
     """
     from emmy.compiler.dim import DEFAULT_SEQ_HINT  # noqa: PLC0415
     from emmy.compiler.ir.base import ConstantOp  # noqa: PLC0415
@@ -489,7 +493,7 @@ def seeded_inputs(program) -> dict[str, np.ndarray]:
     rng = np.random.default_rng(0)
     feed: dict[str, np.ndarray] = {}
     for name in program.inputs:
-        shape = tuple(dim.as_static() if dim.is_static else (dim.hint or DEFAULT_SEQ_HINT) for dim in program.nodes[name].output.shape)
+        shape = tuple(dim.as_static() if dim.is_static else (dim.hint or DEFAULT_SEQ_HINT) for dim in program.buffer(name).shape)
         feed[name] = (rng.standard_normal(shape) * 0.05).astype(np.float32)
     for node_id, node in program.nodes.items():
         if isinstance(node.op, ConstantOp) and node_id not in feed and node.op.value is not None:

@@ -1410,7 +1410,9 @@ class RegFragment(Stmt):
     (``O_i_f0 … O_i_f{count-1}``) collapses to a single arrayed decl indexed
     ``O_i_f[t]``. Only ``100_loopify`` sets ``count > 1`` (the pin-gated
     re-roll); ``count == 1`` renders the flat ``float name[n_regs]`` form,
-    byte-identical."""
+    byte-identical. A family of SCALAR registers (``nregs == 0`` — the fp4
+    block-scale fragments) arrays to one dimension, ``unsigned name[count]``,
+    because its member is the register itself and not an array of them."""
 
     name: str
     role: str  # "a" / "b" / "c"
@@ -1428,16 +1430,22 @@ class RegFragment(Stmt):
     def local_decls(self) -> tuple[str, ...]:
         return (self.name,)
 
+    def _dims(self) -> str:
+        """The declaration's subscripts — the family count when arrayed, then the per-member
+        register count, which a scalar register does not have. Spelled once so the listing and the
+        emitted decl cannot disagree about a family's shape."""
+        n_regs = self._nregs()
+        extents = ((self.count,) if self.count > 1 else ()) + ((n_regs,) if n_regs else ())
+        return "".join(f"[{e}]" for e in extents)
+
     def pretty(self, indent: str = "") -> list[str]:
         m, n, k = self.shape
-        cnt = f"{self.count}][" if self.count > 1 else ""
-        dims = f"[{cnt}{self._nregs()}]" if self._nregs() else ""
-        return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}{dims} ({m}x{n}x{k})"]
+        return [f"{indent}RegFragment {self.role}:{self.dtype.name} {self.name}{self._dims()} ({m}x{n}x{k})"]
 
     def render(self, ctx: RenderCtx) -> list[str]:
         n_regs = self._nregs()
         ctx.ssa_dtypes[self.name] = self.dtype.name
-        dims = "" if n_regs == 0 else f"[{self.count}][{n_regs}]" if self.count > 1 else f"[{n_regs}]"
+        dims = self._dims()
         if self.role == "c" and self.dtype.nbytes != 2:
             # Brace-init zeros the whole (arrayed) accumulator; ``= {0.0f, ...}`` stays the flat form.
             init = " = {}" if self.count > 1 else f" = {{{', '.join(['0.0f'] * n_regs)}}}"
@@ -1447,6 +1455,19 @@ class RegFragment(Stmt):
             init = " = {}" if self.count > 1 else f" = {{{', '.join(['0u'] * n_regs)}}}"
             return [f"{_pad(ctx.indent)}unsigned {self.name}{dims}{init};"]
         return [f"{_pad(ctx.indent)}unsigned {self.name}{dims};"]
+
+
+def frag_dtype(ctx: RenderCtx, frag: str) -> str | None:
+    """Canonical dtype token of a fragment reference (``None`` when no :class:`RegFragment`
+    declares it).
+
+    A ``count``-arrayed family declares the STEM (``_b``) and its members are referenced
+    subscripted (``_b[_r0]`` inside a re-rolled loop, ``_b[3]`` outside one), so the dtype hangs
+    off the stem and a bare ``ctx.ssa_dtypes`` lookup on the reference misses. A miss is silent —
+    every caller has a fallback — so it does not raise, it picks the wrong loader: a packed-pair
+    (NVFP4) byte slab read as if its bytes were fp8 elements, one stored byte standing for two K
+    values."""
+    return ctx.ssa_dtypes.get(frag.partition("[")[0])
 
 
 # Per-lane fp16 element XOR matching the TMA hardware smem swizzle (the
@@ -1685,7 +1706,7 @@ class LdmatrixLoad(Stmt):
             # is passed explicitly, so the pack writes true 16-bit halves instead of raw f32
             # bit patterns (matched dtypes keep the bare call — byte-identical output).
             src_dt = ctx.buffer_dtypes.get(self.src_buffer, "f16")
-            frag_dt = ctx.ssa_dtypes.get(self.frag) or src_dt
+            frag_dt = frag_dtype(ctx, self.frag) or src_dt
             targs = "" if src_dt == frag_dt else f"<{ctx.type_name(src_dt)}, {ctx.type_name(frag_dt)}>"
             b8 = frag_dt in ("f8e4m3", "f8e5m2")
             if self.fragment_layout == "m8n8k4":
@@ -1775,7 +1796,7 @@ class LdmatrixLoad(Stmt):
             assert self.pair_frag is None and not self.byte_slab, "the Volta staged drain is an unpacked f16 gather"
             assert self.swizzle == "NONE", "the Volta shared-memory gather has no swizzled layout"
             slab_dt = ctx.buffer_dtypes.get(self.src_buffer, "f16")
-            frag_dt = ctx.ssa_dtypes.get(self.frag) or slab_dt
+            frag_dt = frag_dtype(ctx, self.frag) or slab_dt
             targs = "" if slab_dt == frag_dt else f"<{ctx.type_name(slab_dt)}, {ctx.type_name(frag_dt)}>"
             helper = (
                 "emmy_mma884_load_a_smem"
@@ -1792,7 +1813,7 @@ class LdmatrixLoad(Stmt):
             # bytes via the ``_b8`` family. ``flat`` already strides the PADDED slab decl and
             # ``ldm`` carries the same padded row stride, so the two agree by construction.
             slab_dt = ctx.buffer_dtypes.get(self.src_buffer, "f8e4m3")
-            frag_dt = ctx.ssa_dtypes.get(self.frag) or "f16"
+            frag_dt = frag_dtype(ctx, self.frag) or "f16"
             if self.scale_buffer is not None:
                 # Packed-pair (NVFP4) B: each byte decodes to two values through the e2m1 value
                 # table and both take the k block's scale, read from the companion slab. The scale

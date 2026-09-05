@@ -82,7 +82,10 @@ axis it installs carries a `Window` receipt), so it opens no fork, adds no sched
 key to any row, and leaves one identity per term. The outer axis walks the stream's extent in
 strides (`Axis.step`) and each inner binder's extent IS the block, so the σ that reads the absolute
 coordinate stays `k_o + k_i` and no width enters the index arithmetic; `lower` renders the outer as
-the `StridedLoop` that already says exactly this.
+the `StridedLoop` that already says exactly this. A level binds the block's half of that pair, never
+the stream's, so the σ reaches everything the level reads — the operand edges' indices AND the lift
+BODIES, where attention's causal mask compares the stream coordinate against a free one directly
+rather than through a slab.
 
 Only a TWISTED carrier is blocked, because it is the only carrier a block gives anything, and only
 when a channel comes out of it BILINEAR. A contraction's block is already spelled: `bk` says how
@@ -127,7 +130,15 @@ A contraction-operand seam stands for a VALUE, not only an object: closed cones 
 their captured axis names fold into one seam, each duplicate carried as a sibling with its capture correspondence,
 and the cut replaces every one with workspace loads spelled through its own axes. A term is closed by construction —
 its values arrive through its operand edges — so every stored non-slab edge is a seam and there is no capture to
-resolve outward. A two-pass softmax's row statistics are not seams of this tree: the twist carries them as
+resolve outward. A workspace load is named after its WORKSPACE — the cone's result name tagged with the seam — never
+after the cone alone: a lowered body reads producer names throughout, and the value a cut materialized can still be
+computed in place elsewhere in the same kernel (a cone the replacement did not reach, or a second seam exposing the
+same value), which under one shared name is a rebind the emitted source cannot carry.
+That rename reaches the term's own readers for free — a consumer's params are spelled as the result names of the edge
+they bind — but a kernel-boundary store sits OUTSIDE the term: `TileOp.output_specs` names its stored value as a plain
+string, so the consumer's stores are re-spelled through the same map. Cutting a branch the kernel stores WHOLE leaves
+that store as the only reader the value has, and unre-spelled it names a value the consumer no longer defines.
+A two-pass softmax's row statistics are not seams of this tree: the twist carries them as
 components of ONE fold, so there is no statistic edge to materialize, and the score contraction and the fold itself
 are the seams that stand there. The unpinned fork offers every seam as its own structural arm. Bare `PLACE=cut`
 resolves to the root-most seam: it names one deterministic pinned decision and is consumed on the fresh pieces.

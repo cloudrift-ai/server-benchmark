@@ -29,6 +29,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.kernel import KernelOp
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
+from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.tile import TileOp
 from emmy.compiler.ir.tile.ops import UnbindableProjection, reduce_plan, sched_of
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
@@ -47,13 +48,40 @@ def rewrite(match: Match, root: Node) -> KernelOp | None:
     assert rplan is None or not rplan.needs_split, "materialize: a GRID split stage reached the kernel pass past 030_cut"
     try:
         materialized = _pointwise_strip(tile, factorize(tile, root))
-        return KernelOp(body=_drop_repeated_declarations(Body((materialized,))), name=tile.name)
+        body = _drop_repeated_declarations(Body((materialized,)))
+        unbound = _unbound_names(tile, root, body)
+        assert not unbound, f"materialize: kernel {tile.name!r} reads names it never binds: {sorted(unbound)}"
+        return KernelOp(body=body, name=tile.name)
     except UnbindableProjection as exc:
         # The offered row has no multi-root binding (e.g. it tiles two contraction operands of a
         # projection whose outputs do not partition by root). The row stays OFFERED — the
         # realization corpus pins that — and the compile declines it here: the skip is recorded,
         # the node stays a TileOp, and the greedy blocklist retry resolves onto the next row.
         raise RuleSkipped(f"kernel binder refuses this row's projection ownership: {exc}", reject=True) from exc
+
+
+#: The CTA helper coordinates the kernel renderer declares in the prologue of any body that uses
+#: them (``ir.stmt.blocks``), so a statement may read them without any binding in the IR.
+_RENDERED_HELPERS = frozenset({"lane", "warp"})
+
+
+def _unbound_names(tile: TileOp, root: Node, body: Body) -> set[str]:
+    """Names the emitted kernel body reads that its launch never supplies — always a compiler bug.
+
+    A well-formed kernel reads its own buffers, the symbolic extents its launch passes beside them
+    (the free vars of the axis table's extents — a ``Dim('seq_len')`` reduce bound, a ceil-div block
+    count) and the renderer's CTA helpers, and nothing else: every other name is bound by a statement
+    or by an enclosing axis, which is exactly what :func:`free_names` subtracts. What survives is a
+    value some emission referred to under a spelling nothing defines — a per-cell rename whose shared
+    coordinates missed an axis, a staged fill whose σ left a tile axis free, a workspace read the
+    boundary store was not re-spelled for. Each of those reached ``nvcc`` as *identifier "x" is
+    undefined*, a hundred errors deep in a generated source and attributed to whichever candidate the
+    tuner happened to be benching. Asking it here names the kernel and the value instead, in the pass
+    that built them."""
+    bound = {*root.inputs, *root.buffer_names(), *_RENDERED_HELPERS}
+    for axis in (*tile.axes, *tile.place.free):
+        bound |= set(axis.extent_expr().free_vars())
+    return set().union(*(free_names(stmt) for stmt in body)) - bound
 
 
 def _pointwise_strip(tile: TileOp, materialized):

@@ -5,7 +5,7 @@ gate; a :class:`Blend` decides what to *do* with them. Two questions, and they a
 
 - **Who owns the deploy ranking** (:meth:`Blend.deploy_half`) — the greedy argmin, ``pick``, and the featurized
   diagnostics surface. This returns one whole prior rather than a mixed score vector, because ``pick``'s score
-  feeds ``greedy._pick_structural`` as an absolute µs cost estimate: mixing an ordinal proxy into that scale is
+  feeds ``greedy._priced_pick`` as an absolute µs cost estimate: mixing an ordinal proxy into that scale is
   precisely what went wrong on the selection side. Blending here would mean reopening that seam deliberately.
 - **What PUCT explores by** (:meth:`Blend.policy`) — where the two halves genuinely combine, safely, because
   ``Prior.policy`` has already normalized both to the same sibling-relative scale.

@@ -318,12 +318,16 @@ Then run the gates, in this order, after every edit above is in:
     go red, name the change that did it in the PR body — do **not** re-record them to make it green, which enshrines
     the regression as the new reference.
 25. **Write the PR body** to `.github/PULL_REQUEST_TEMPLATE.md`. The title is a functional description readable
-    with no context. The abstract is one plain-English paragraph plus at most five bullets, no code references.
-    One optional artifact may follow it — a small table, a diagram, a few lines of output — when it carries the
+    with no context. The abstract is one short plain-English paragraph — no bullets, no code references. One
+    optional artifact may follow it — a small table, a diagram, a few lines of output — when it carries the
     claim better than the paragraph. Then a horizontal rule, then everything else — decisions, measurements,
     what broke, what got slower, what was removed — under headings that fit the story. `Abstract` is the only
     fixed heading.
-26. **Mark the PR ready for review.** This is the last step. A draft PR that has not been through finalization
+26. **Revise the PR body at least twice before posting.** Write it, then reread it as a reviewer with no
+    context, check it against the template and against the design philosophy below, cut, and repeat. A first
+    draft is always too long: it lists what was done instead of saying what the change is, and it keeps
+    sentences that no reviewer would miss. Stop when nothing else can come out without losing the point.
+27. **Mark the PR ready for review.** This is the last step. A draft PR that has not been through finalization
     is not ready, whatever else is green.
 
 # Behavioral Guidelines:

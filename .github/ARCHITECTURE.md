@@ -21,10 +21,12 @@ from a developer checkout through the tracked `.agents/skills/run-experiment` sk
 ## Pull-request body
 
 `PULL_REQUEST_TEMPLATE.md` fixes the shape of every PR: a title that describes the change functionally, an
-abstract of one plain-English paragraph and at most five bullets, an optional single artifact backing that
-abstract — a small table, a diagram, a few lines of output — a horizontal rule, and then the rest under
-headings chosen to fit the change. `Abstract` is the only fixed heading. The split exists so a reader can
-decide from the abstract alone whether the PR concerns them, which is why code references stay below the rule.
+abstract of one short plain-English paragraph, an optional single artifact backing that abstract — a small
+table, a diagram, a few lines of output — a horizontal rule, and then the rest under headings chosen to fit
+the change. `Abstract` is the only fixed heading. The split exists so a reader can decide from the abstract
+alone whether the PR concerns them, which is why code references stay below the rule. The template also asks
+for two revision passes before posting, because the failure it guards against is a first draft that lists
+everything done instead of saying what the change is.
 
 ## Pull-request checks
 

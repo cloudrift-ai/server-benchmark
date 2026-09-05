@@ -151,3 +151,37 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     twin_row = dict(next(iter_leaves(classic_forks(twin, "t", twin.knobs, ctx))).knobs)
     assert spelled in twin_row
     assert {key for key in row if "@" in key} == {key for key in twin_row if "@" in key}
+
+
+def test_an_off_precision_gate_stamps_the_same_space() -> None:
+    """The stamp seeds a budgeted pool's draw, so two pin states that enumerate the same rows must
+    share it. ``precision_pin`` reads an explicit OFF gate exactly as an unset one — neither offers
+    the f16-accumulate / native-fp8 siblings — and a standard-lane golden's regime publishes that
+    OFF spelling (``pinned_knobs({"FAST_MATH": False})``, what ``compile --golden`` and the release
+    gate install). Before this held, the regime pin re-seeded the draw of every budgeted pool and a
+    replay elected a different row than the deploy it replayed."""
+    from emmy.compiler.pipeline.knob import schedule_pin_fingerprint
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.pipeline.search.space import F16_MMA_F32_ACC, FAST_MATH, FP8_MMA
+
+    clean = schedule_pin_fingerprint()
+    for off in ({"FAST_MATH": False}, {"FAST_MATH": 0}, {"F16_MMA_F32_ACC": 0, "FP8_MMA": 0}):
+        with pinned_knobs(off):
+            assert schedule_pin_fingerprint() == clean, f"an OFF gate {off} enumerates the unset space and must stamp it"
+    ctx = Context.from_target((12, 0))
+    tile = _unmapped_tile(8, 8)
+    pool = classic_forks(tile, "t", tile.knobs, ctx)[0].pool_id
+    with pinned_knobs({"FAST_MATH": False}):
+        assert classic_forks(tile, "t", tile.knobs, ctx)[0].pool_id == pool, "the published regime must mint the deploy's pool"
+    # The umbrella spells exactly what it enables: one stamp for ``FAST_MATH=1`` and for both gates pinned ON,
+    # and an individual OFF pin under the umbrella is the other gate alone.
+    with FAST_MATH.pinned("1"):
+        umbrella = schedule_pin_fingerprint()
+        with F16_MMA_F32_ACC.pinned("0"):
+            f16_off = schedule_pin_fingerprint()
+    assert umbrella != clean
+    with F16_MMA_F32_ACC.pinned("1"), FP8_MMA.pinned("1"):
+        assert schedule_pin_fingerprint() == umbrella
+    with FP8_MMA.pinned("1"):
+        assert schedule_pin_fingerprint() == f16_off
+    assert schedule_pin_fingerprint() == clean

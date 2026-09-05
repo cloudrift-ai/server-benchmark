@@ -179,20 +179,22 @@ gaps stand between here and a boot that serves, both follow-ups to #692:
    disqualifications, and no online prior was written. The monotone serial-work prior feature remains the
    cold-start answer. NOTE: the host's tune DB now carries those 9 rows, so any unpinned compile there elects the
    partitioned route — intended, now that #700 makes it build.
-3. **Price the recomputation so the statistics piece gets elected — LANDED (#702), and the elected statistics
-   piece measures 8.6 ms on the host.** Even the elected 2³⁰ route ran past the 60 s bench watchdog
+3. **Price the recomputation so the statistics piece gets elected — LANDED (#702), then the clamp REVERTED by
+   review decision; the statistics piece elected under it measured 8.6 ms on the host.** Even the elected 2³⁰ route
+   ran past the 60 s bench watchdog
    per launch: the dominant cost was re-evaluating the mHC statistics subtree 16,384× (4096 carrier positions × 4
    streams) inside the consumer piece's sum-of-squares reduce. Characterized GPU-free: the materializing seam
    (`PLACE@a8`, the gate's fn-projection) was OFFERED and priced away — the offline cold-start proxy gave the
    fused 2³⁰-trip nest 4.29e-37 µs against the cut arm's 1.02e-17, with zero weights on any structural feature.
-   The landed fix is pricing: the nest-aware `S_ext_serial_cell_work` stamp, the coverage-adjusted
-   `D_serial_cell_work` feature, and a guarded clamp at the kernel-set Σ (`policy/greedy._resolved_price`) — a
-   kernel whose serial-work lower bound exceeds 1 ms prices at least that bound; below the guard elections stand
-   untouched, so a future recomputation nest under ~2²³ per-thread trips is still adjudicated by the uncalibrated
-   proxy. (Plus: disqualification signatures survive featurizer vocabulary growth — the stamp alone had silenced
-   the host DB's 9 `bench_fail` rows — and `SearchDB` schema v4 drops stale `lowering` chains keyed pre-stamp.)
-   Replayed on the pinned twins + host-DB copy, the greedy elects the same 12-piece plan plus exactly the
-   `PLACE@a8` statistics piece — 13 kernels, the consumer drops 2³⁰ → 2¹⁶ and the route's worst piece is 2¹⁹
+   #702 answered with pricing: the nest-aware `S_ext_serial_cell_work` stamp, the `D_serial_cell_work` fit signal,
+   and a guarded clamp at the kernel-set Σ that priced a kernel at least its serial-work lower bound past 1 ms.
+   The clamp was reverted on review: a lower bound on the prior's estimate is not how the deploy path elects —
+   the prior must not decide a production election at all, and where it does, the missing golden or measured row
+   is the defect. The stamp and fit signal stay (the prior can learn serial work), as do the two fixes that rode
+   the same PR: disqualification signatures survive featurizer vocabulary growth (the stamp alone had silenced
+   the host DB's 9 `bench_fail` rows) and `SearchDB` schema v4 dropping stale `lowering` chains keyed pre-stamp.
+   Under the clamp, replayed on the pinned twins + host-DB copy, the greedy elected the same 12-piece plan plus
+   exactly the `PLACE@a8` statistics piece — 13 kernels, the consumer drops 2³⁰ → 2¹⁶ and the route's worst piece is 2¹⁹
    per-thread trips (the unaided fused monster was 2³⁸).
 4. **Make the elected pieces fast — OPEN; the path is now recorded goldens, not pricing.** Measured on the host
    2026-09-02: the elected route benched completely for the first time (every earlier attempt died on the 60 s

@@ -594,12 +594,20 @@ def _prebuild_descriptors(
 # cliff, and a real hung kernel is still evicted in 2 s. ``EMMY_KERNEL_TIMEOUT_MS`` overrides —
 # read live through ``config.kernel_timeout_ms()`` (the env owner), never cached at import.
 
-# First-launch grace multiplier: a program's FIRST uncaptured iteration may stall well past the
+# First-iteration grace: a program's FIRST uncaptured iteration may stall well past the
 # steady-state watchdog without any kernel being hung — lazy module loading (CUDA_MODULE_LOADING=
 # LAZY uploads each kernel's SASS on first launch), the smem-carveout reconfig for a 96 KB dynamic-
-# smem kernel, and allocator first-touch all land there. A genuinely hung kernel is still caught on
-# iter 0, just ``_FIRST_ITER_GRACE`` x later.
-_FIRST_ITER_GRACE = 30.0
+# smem kernel, and allocator first-touch all land there. It runs under its own deadline,
+# ``config.first_iter_timeout_ms()`` (``EMMY_FIRST_ITER_TIMEOUT_MS``, default 30x the steady one),
+# so a genuinely hung kernel is still caught on iter 0, just later — and how much later is no
+# longer tied to the steady deadline.
+
+
+def _launch_deadline_ms(iters_done: int, batch: int) -> float:
+    """The watchdog deadline for one event window of ``batch`` launches: the first iteration's
+    own budget on iter 0, the steady per-launch deadline after."""
+    per_launch = config.first_iter_timeout_ms() if iters_done == 0 else config.kernel_timeout_ms()
+    return per_launch * batch
 
 
 class HungKernelError(RuntimeError):
@@ -754,8 +762,8 @@ class CompiledProgram:
     # caused ``test_tuned_variant_matches_reference`` to flake ~30%).
     _starts: list = field(default_factory=list, repr=False)
     _stops: list = field(default_factory=list, repr=False)
-    # Number of completed ``iter_once`` calls — iter 0 gets the ``_FIRST_ITER_GRACE`` watchdog
-    # multiplier (first-launch lazy-load / carveout stalls are not hangs; see the constant's note).
+    # Number of completed ``iter_once`` calls — iter 0 runs under the first-iteration watchdog
+    # deadline (first-launch lazy-load / carveout stalls are not hangs; see ``_launch_deadline_ms``).
     _iters_done: int = field(default=0, repr=False)
     # Per-launch CUDA graphs (one per launch position, each containing that
     # launch's whole batch) captured by :meth:`capture_launch_graphs`. When
@@ -1185,8 +1193,7 @@ class CompiledProgram:
                 for _ in range(b):
                     _launch(launch, self.compiled, self.arrays, descs.get(i), self.sym_values)
             stops[i].record()
-            grace = _FIRST_ITER_GRACE if self._iters_done == 0 else 1.0
-            _wait_for_event(stops[i], config.kernel_timeout_ms() * b * grace, f"{launch.kernel_name} (iter {self._iters_done})")
+            _wait_for_event(stops[i], _launch_deadline_ms(self._iters_done, b), f"{launch.kernel_name} (iter {self._iters_done})")
             elapsed_ms = cp.cuda.get_elapsed_time(starts[i], stops[i])
             # CUDA event timing has sub-µs resolution and a real launch must
             # consume at least one device cycle — a 0.0 reading means the

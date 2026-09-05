@@ -12,14 +12,23 @@ carriers of its own: a piece cut away from the value channel has nothing a block
 
 from __future__ import annotations
 
+from importlib import import_module
+
 import pytest
 
 from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
 from emmy.compiler.ir.schedule.classic_projection import project_classic
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.block import MAX_BLOCK, block_tree, block_twisted, block_width
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
+
+_blocking = import_module("emmy.compiler.pipeline.passes.lowering.tile.035_block")
+MAX_BLOCK, block_tree, block_twisted, block_width = (
+    _blocking.MAX_BLOCK,
+    _blocking.block_tree,
+    _blocking.block_twisted,
+    _blocking.block_width,
+)
 
 _CTX = Context.from_target((12, 0))
 

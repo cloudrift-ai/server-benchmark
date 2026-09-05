@@ -186,8 +186,22 @@ class Lambda:
         """The closed cone of one definition — the statements of the body ``name`` depends on, as a
         lambda over what they read (a param names itself: an empty body returning it). What a
         reader asks of one result without the rest of the body: the score a fold's lift computes,
-        the value one component of a projection denotes. Params in :meth:`closing`'s order."""
-        members = () if name in self.params else tuple(self.body.backward_cone((name,)).members)
+        the value one component of a projection denotes. Params in :meth:`closing`'s order.
+
+        A PARAM NAMES ITSELF, and that has to hold for the reads inside the cone too. A stored
+        combine is not SSA in its states: it takes ``acc`` in as a param and writes ``acc`` back on
+        the way out to spell its result. :meth:`Body.backward_cone` resolves by name over a body it
+        documents as SSA, so a read of the INCOMING ``acc`` resolves forward to that trailing write
+        and drags it into the cone — which is how a weight cone came to carry the pivot's own state
+        advance, and the kernel to read an uninitialized accumulator. Hiding the re-bindings makes
+        the walk see the binder's scoping instead: under a param's spelling the body reads the
+        value that came in, so the read lands in ``external_reads`` and closes back as that param.
+        """
+        if name in self.params:
+            return Lambda.closing((), Body(()), (name,))
+        params = set(self.params)
+        visible = Body(tuple(s for s in self.body if not (_exposed_defines(s) & params) or name in _exposed_defines(s)))
+        members = tuple(visible.backward_cone((name,)).members)
         return Lambda.closing((), Body(members), (name,))
 
     def rename(self, names) -> Lambda:

@@ -482,6 +482,12 @@ the shared substrate behind the rules that slice cones (the demoted-operand prod
 `lowering/tile/030_cut`) — eligibility judgments stay in the rules, per
 `pipeline/passes/ARCHITECTURE.md`.
 
+`backward_cone` resolves reads by NAME over a body it assumes is SSA, so it is only sound where one name has one
+def. `Lambda.cone` is the caller that cannot assume it: a stored combine takes its states in as params and writes
+them back on the way out to spell its results (`Recipe.program`), so a read of the INCOMING state would resolve
+forward to the write-back. A param names itself, and `cone` keeps it that way by hiding the re-bindings from the
+walk. Any other caller that cones a non-SSA body owes itself the same reading.
+
 `rewrite` has two distinct rename channels that must stay disjoint:
 `rename_ssa` carries **SSA-name** renames, `sigma` carries **axis**
 substitutions. `Load`/`Write` index exprs apply *both*

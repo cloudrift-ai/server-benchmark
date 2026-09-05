@@ -6,6 +6,10 @@ description: Learn how to benchmark LLM models across GPU types and configuratio
 
 # Running Benchmarks
 
+For a beginner-friendly walkthrough of Emmy's two benchmarking workflows—including local PyTorch comparisons,
+profiling, fair-experiment rules, recipe dry runs, and result files—see
+[Benchmarking and Comparing Emmy](../course/benchmarking_emmy).
+
 Emmy lets you run standardized benchmarks across different GPU types and model configurations,
 so you can find the best performance-to-cost ratio before committing to a deployment.
 

@@ -1,0 +1,563 @@
+---
+sidebar_position: 6
+validated_against_commit: ec0ca0213378dcba6d3ea2cd16ba66e1a34c2c9c
+title: Emmy Course Glossary
+description: >-
+  Plain-language definitions of the machine-learning, compiler, GPU, deployment, and tuning terms used in the Emmy
+  course.
+keywords: [Emmy, glossary, LLM, compiler, CUDA, GPU, vLLM]
+---
+
+# Course glossary
+
+This page defines the project-specific and technical language used in the course. The definitions describe how a term
+is used in Emmy; they are not meant to replace a full textbook definition.
+
+## Machine learning and model serving
+
+**Large language model (LLM)**
+A program trained on a large amount of text to predict or generate language. In this course, an LLM is mainly a chain
+of tensor operations that must run on a GPU.
+
+**Model**
+A collection of mathematical operations and learned numbers called weights. The operations describe what to compute;
+the weights contain information learned during training.
+
+**Weight**
+A number learned during model training. A real model contains millions or billions of weights, usually stored in
+tensors.
+
+**Tensor**
+A rectangular collection of numbers. A scalar is a zero-dimensional tensor, a list is one-dimensional, a table is
+two-dimensional, and higher-dimensional tensors can represent batches, tokens, or model features.
+
+**Shape**
+The size of every tensor dimension. A tensor with shape `(2, 8, 16)` has 2 groups, 8 rows per group, and 16 values per
+row. The meaning of each dimension depends on the operation.
+
+**Dimension / axis**
+One position in a tensor's shape. PyTorch numbers dimensions from the left starting with `0`, while negative indexes
+count from the right: `-1` is the last dimension and `-2` is the second-to-last. `tensor.sum(-1)` therefore sums along
+the final dimension.
+
+**Dtype (data type)**
+The format used to store each tensor value, such as 32-bit floating point (`float32`) or 16-bit floating point
+(`float16`). Smaller formats use less memory and can be faster but may lose precision.
+
+**Inference**
+Using an already-trained model to produce an answer. It is different from training, which changes the weights.
+
+**Token**
+A small piece of text represented by an integer. A tokenizer converts text into tokens before an LLM processes it.
+
+**Embedding**
+A list of numbers representing the meaning or features of an input. Similar inputs often have nearby embeddings.
+
+**Pooling**
+Combining a sequence of token-level hidden-state vectors into one vector for the whole input. The name comes from
+collecting, or pooling, many token representations into one fixed-size result. vLLM's pooling runner owns this final
+step for Emmy embedding models.
+
+**Batch**
+Several inputs processed together. Batching often makes better use of a GPU.
+
+**vLLM**
+An external model-serving system. It owns the HTTP API, request scheduling, tokenization, batching, and other serving
+work. Emmy can plug compiled model operations into that system.
+
+**Transformer**
+The neural-network architecture used by most modern LLMs. It processes token representations through repeated layers
+containing attention and other tensor operations.
+
+**Mixture of experts (MoE)**
+A model layer with many expert subnetworks and a router that selects a small subset for each token. Emmy's generative
+serving path splits this work at the MoE third seam so routing stays outside the compiled expert program while one
+weight-parameterized program serves the selected experts.
+
+**Quantization**
+Representing model weights or activations with fewer bits to reduce memory and bandwidth. Formats used by current Emmy
+serving paths include FP8, NVFP4, MXFP4, AWQ INT4, and EXL3; each format has its own scaling and layout contract.
+
+**NVFP4 / MXFP4 / EXL3**
+Low-bit weight formats. NVFP4 and MXFP4 are four-bit floating-point formats with different block-scaling conventions.
+EXL3 is a mixed-rate coded format whose allocation can vary by tensor. Emmy decomposes their decoding into generic
+compiler algebra at the loader boundary.
+
+**KV cache (key/value cache)**
+GPU memory that stores attention information for tokens a model has already processed. Reusing it avoids recalculating
+the entire earlier sequence during text generation. A paged KV cache manages this memory in fixed-size pieces.
+
+**Hugging Face**
+An ecosystem for publishing and loading models, datasets, and related tools. Emmy can trace compatible models loaded
+through Hugging Face libraries.
+
+## Compiler concepts
+
+**Compiler**
+A program that translates code from one form into another. Emmy translates PyTorch model operations into CUDA code.
+
+**Trace versus compile**
+Tracing captures PyTorch operations and converts them into Emmy's frontend `Graph`. Compilation starts from that graph
+and runs transformation passes toward Tensor, Loop, Tile, Kernel, or CUDA IR. The `emmy compile` CLI emits the selected
+IR for inspection; `emmy run` continues into CUDA runtime compilation and GPU execution.
+
+**Operation (op)**
+One unit of computation, such as add, matrix multiplication, softmax, or RMSNorm.
+
+**Graph**
+A representation of a program as nodes connected by data-flow edges. A node usually represents an operation; an edge
+means that one operation uses a value produced by another.
+
+**Node**
+One item in a graph. In Emmy, it stores an operation, its input node IDs, output tensor information, and optional
+metadata.
+
+**Intermediate representation (IR)**
+A compiler's internal description of a program. Emmy uses several IR stages. Early stages resemble PyTorch; later
+stages explicitly describe loops, GPU threads, memory, and CUDA source.
+
+**Dialect**
+The vocabulary allowed in one IR stage. For example, Tensor IR uses tensor primitives, while Kernel IR uses
+hardware-oriented statements.
+
+**Tensor IR**
+The compiler-generated Emmy `Graph` after frontend decomposition and optimization. Its compute nodes carry primitives
+such as `ElementwiseOp`, `ReduceOp`, and `IndexMapOp`.
+
+**Loop IR**
+The same outer Emmy `Graph` after tensor operations have been lifted into explicit loop bodies and compatible bodies
+have been fused. Its compute nodes carry `LoopOp` operations.
+
+**Fold**
+Tile IR's one stored pure reduction term: an optional iteration axis, a lift lambda that produces one contribution, an
+initial state, an associative state-combine lambda, and operand edges. Pointwise maps, ordinary reductions, twisted
+state, and contractions are derived readings of this single representation.
+
+**Total lift**
+The Loop-to-Tile invariant that every reduction loop becomes a Fold and every output effect becomes an output
+specification. Tile IR has no raw-loop escape hatch; an unrepresentable boundary fails loudly.
+
+**Classification**
+A derived algebraic reading of a Fold, such as planar, twisted, or contraction. Classification does not change the
+stored term and is distinct from choosing a hardware schedule.
+
+**Monoid family**
+The associative combine algebra carried by a Fold. A componentwise family includes ordinary sum or maximum; a twisted
+family combines multi-component state such as a stable exponential pivot and expectation.
+
+**Scan**
+A Fold that exposes its carried state at every step, rather than only its final state. Emmy represents the per-step tap
+with an observer lambda and preserves its writes through output specifications.
+
+**Closure**
+The transitive set of values or operations required by a result. Compiler transformations use closures to move or cut
+complete dependency cones without leaving a required producer behind.
+
+**Multi-output node**
+One graph node that produces several tensor outputs. All outputs share one execution and schedule identity, so fusion,
+cutting, and lowering must preserve them together.
+
+**Output equivalence cluster**
+Outputs that represent the same computation boundary and must be rewritten or scheduled consistently even if they have
+different graph names.
+
+**`LoopOp` versus `Loop`**
+A `LoopOp` is an operation stored in a Graph node and describes one kernel-sized region of computation. A `Loop` is a
+statement nested inside `LoopOp.body`; it is not a separate Graph node. One `LoopOp` may contain several `Loop`, `Load`,
+`Assign`, `Accum`, and `Write` statements.
+
+**Frontend / backend**
+The frontend reads and represents the source program, such as PyTorch operations. The backend turns a lower-level
+representation into executable code for a target such as CUDA.
+
+**Pass**
+One ordered compiler phase. A pass searches for known patterns and rewrites them into a form suitable for the next
+phase.
+
+**Rewrite rule**
+A small compiler transformation. It recognizes a pattern, such as RMSNorm, and replaces it with equivalent lower-level
+operations.
+
+**Pipeline**
+An ordered sequence of compiler passes. The output of one stage becomes the input to the next.
+
+**Decomposition**
+Breaking a complex operation into simpler operations. Emmy decomposes recognizable PyTorch operations into a small
+set of tensor primitives.
+
+**Primitive**
+A basic operation used as a building block, such as elementwise arithmetic, reduction, or index mapping.
+
+**Elementwise operation**
+An operation independently applied to corresponding tensor elements, such as adding two tensors.
+
+**Reduction**
+Combining many values into fewer values, such as summing a row or finding its maximum.
+
+**Broadcasting**
+Reusing a smaller tensor across a larger shape. For example, one weight per column can be reused for every row.
+
+**Index map**
+A description of how output coordinates correspond to input coordinates. Emmy uses index maps for broadcasting,
+transposing, slicing, and reshaping.
+
+**Tracing**
+The general act of observing a program with representative inputs to capture its operations and data flow. In Emmy,
+this is a multi-part boundary: PyTorch's `torch.export.export` produces an FX graph, then Emmy's `trace_module` wrapper
+converts it into an Emmy `Graph`. The `emmy trace` CLI command prepares inputs and saves that result. This is not the
+older `torch.jit.trace` API.
+
+**`torch.export`**
+PyTorch's library for capturing an `nn.Module` and representative inputs as an `ExportedProgram`. Emmy uses its FX
+graph instead of parsing the model's Python source itself.
+
+**FX graph**
+PyTorch's graph representation. Its nodes describe inputs, function calls, and outputs and carry metadata such as
+inferred tensor shapes and data types.
+
+**ATen**
+The lower-level operation library beneath much of PyTorch. After `torch.export`, FX compute nodes commonly refer to
+ATen operations such as addition, matrix multiplication, or RMSNorm; Emmy maps those targets into its own operations.
+
+**Lowering**
+Moving from a high-level representation to a more detailed, machine-oriented one while preserving the program's
+meaning.
+
+**Runtime**
+The code and state involved while a compiled program is executing. Emmy's CUDA runtime allocates buffers, resolves
+dynamic sizes, and launches kernels.
+
+**Fusion**
+Combining operations so that one GPU kernel performs work that would otherwise require several kernels. Fusion can
+avoid writing temporary values to slower global memory.
+
+**Static shape**
+A tensor shape known when compiling, such as exactly 512 tokens.
+
+**Dynamic or symbolic shape**
+A shape containing a named value, such as `seq_len`, whose actual size is supplied when the program runs.
+
+**Provenance**
+Metadata that records where generated code came from. It helps connect a final CUDA kernel back to the original model
+operation when debugging.
+
+**Metadata**
+Information *about* program data rather than the data itself, such as a tensor's shape, a kernel's original operation,
+or the number of threads needed for launch.
+
+**Mutable / immutable**
+A mutable object can be changed after creation. An immutable object cannot; code creates a replacement instead. Emmy's
+graph is mutable, while many nested compiler statements are immutable.
+
+**Structural identity / structural key**
+A fingerprint based on computation and data flow rather than cosmetic names. It lets Emmy recognize equivalent
+compiler candidates.
+
+**Idempotent rule**
+A rule that does not keep changing its own output when applied again. Compiler rewrite rules need this property because
+a pipeline may revisit earlier rules.
+
+**JIT compilation (just-in-time compilation)**
+Compiling code during program execution, shortly before it is needed.
+
+## GPU and CUDA concepts
+
+**GPU (graphics processing unit)**
+Hardware designed to run many similar calculations in parallel. GPUs were developed for graphics and are now widely
+used for machine learning.
+
+**CUDA**
+NVIDIA's platform and programming model for running general-purpose code on NVIDIA GPUs.
+
+**Kernel**
+A function executed on the GPU by many parallel workers. In this course, “kernel” means a GPU function, not an
+operating-system kernel.
+
+**Thread**
+One GPU worker executing a kernel. Threads are organized into blocks.
+
+**Block / cooperative thread array (CTA)**
+A group of GPU threads that can cooperate using fast shared memory and synchronization.
+
+**Warp**
+A small group of GPU threads—32 on current NVIDIA hardware—that execute instructions together.
+
+**Grid**
+All thread blocks launched for one kernel call.
+
+**Shared memory**
+Fast memory shared by threads in one block. It is limited in size and must be managed explicitly.
+
+**Global memory**
+The GPU's large main memory. It has much higher capacity than shared memory but is generally slower to access.
+
+**Register**
+Very fast storage private to one GPU thread.
+
+**Tile**
+A small rectangular piece of a larger tensor computation. GPU programs process tiles so data can fit in fast memory
+and be shared by nearby threads.
+
+**Schedule**
+The plan for executing correct mathematics on hardware: tile sizes, thread assignments, memory movement, and
+synchronization. Different schedules can compute the same answer at very different speeds.
+
+**Staging**
+Moving a piece of data into faster memory before computing with it, often from GPU global memory to shared memory.
+
+**Synchronization**
+Making workers wait until a required event or memory update is complete. It prevents threads from reading data before
+other threads have finished producing it.
+
+**Contraction**
+A multiply-and-combine operation over one or more dimensions. Matrix multiplication is the most familiar example.
+
+**Carrier**
+The temporary state maintained by a reduction and the rule for combining partial states. A sum's carrier can be one
+accumulated number; stable softmax needs several related values.
+
+**Tensor core**
+Specialized GPU hardware for performing small matrix operations efficiently.
+
+**nvcc / NVRTC**
+Two NVIDIA CUDA compilers. `nvcc` compiles ahead of execution; NVRTC compiles CUDA source at runtime.
+
+**CUDA graph capture**
+Recording a sequence of GPU launches so the sequence can be replayed with less CPU overhead.
+
+**DLPack**
+A standard for sharing tensor memory between libraries without copying the values through CPU memory.
+
+## Deployment and benchmarking
+
+**CLI (command-line interface)**
+The commands and options used from a terminal, such as `emmy compile`.
+
+**YAML**
+A human-readable configuration format. Emmy recipes are written in YAML.
+
+**Recipe**
+A version-controlled plan describing what model or command to run, how to deploy it, which hardware and benchmark
+settings to use, which variants to compare, and which raw files a command workload declares. Commands such as
+`emmy deploy` and `emmy bench` consume recipes; a recipe does not execute or interpret results by itself.
+
+**Variant**
+One concrete combination of recipe settings. A matrix can expand one recipe into many variants.
+
+**Matrix**
+A recipe section that describes several values to test. `cross` creates every combination; `zip` pairs values by
+position.
+
+**Benchmark**
+A controlled measurement of speed, latency, throughput, or resource use.
+
+**Experiment row**
+One expanded recipe variant executed as an independent unit. A row has a stable identity even when its readable variant
+label is abbreviated.
+
+**Experiment record**
+The system-only YAML record for one experiment row. It stores identity, provenance, lifecycle, timings, errors,
+infrastructure state, and observed host facts, but no benchmark measurements or conclusions.
+
+**Raw experiment results**
+The workload's unparsed output files and logs. Emmy preserves them without deciding whether latency, throughput,
+accuracy, request counts, or coverage are acceptable.
+
+**Heat score**
+A prioritization score used by model discovery to combine public attention with operational relevance. It helps decide
+what to investigate and is not a benchmark measurement or quality claim.
+
+**Profiling**
+Collecting detailed evidence about where time or hardware resources are used. A benchmark says how long something
+takes; a profile helps explain why.
+
+**Eager PyTorch**
+Normal PyTorch execution in which operations are dispatched as the program reaches them. On a GPU, those operations
+often call optimized kernels from ATen, cuBLAS, or cuDNN. It is a performance baseline and is unrelated to
+`model.eval()`.
+
+**Warmup iteration**
+An untimed execution performed before benchmark measurements so initialization, compilation, caches, and GPU clock
+behavior can settle.
+
+**Latency**
+The time needed to complete one operation or request. Lower latency is faster.
+
+**Throughput**
+The amount of work completed per unit of time, such as requests per second. Higher throughput is better.
+
+**Time to first token (TTFT)**
+The delay between sending a text-generation request and receiving its first generated token.
+
+**Time per output token (TPOT)**
+The average time required for each generated token after generation starts.
+
+**Inter-token latency (ITL)**
+The time gap between successive streamed output tokens.
+
+**End-to-end latency (E2EL)**
+The total time from sending a request until the complete response arrives.
+
+**Percentile**
+A position in a sorted set of measurements. A p99 latency means 99 percent of observed requests were no slower than
+that value; it helps reveal slow tail requests that an average can hide.
+
+**VM (virtual machine)**
+A computer created by software, often rented from a cloud provider. A GPU VM includes one or more GPUs.
+
+**Provisioning**
+Obtaining and preparing a machine. This may include creating a cloud VM, installing software, and returning connection
+details.
+
+**Deployment**
+Placing and starting the application on a machine that is already available.
+
+**Docker container**
+An isolated package containing an application and its dependencies.
+
+**Docker Compose**
+A configuration format and tool for defining and starting several related containers.
+
+**Smoke test**
+A quick check that the deployed service starts and can answer a basic request before expensive benchmarks begin.
+
+**Control plane**
+The code that coordinates work—choosing machines, starting services, and collecting results—rather than performing the
+model computation itself.
+
+## Search and tuning
+
+**Autotuning**
+Trying several valid GPU schedules, measuring them, and keeping evidence about which ones are fast.
+
+**Fork**
+A compiler decision point with several correct alternatives. Each branch can lead to a different schedule.
+
+**Knob**
+A named tuning choice, such as a tile size or memory-staging strategy.
+
+**Pin**
+Forcing a tuning choice instead of letting the compiler decide it, through an `EMMY_<KNOB>` value or exact recorded
+replay. A pinned benchmark must prove that the requested row actually realized before its timing is evidence.
+
+**Schedule key**
+The path-aware name of one schedule choice, such as bare `TILE` for the primary site or `REDUCE@<axis>` when one Fold
+tree contains several choices from the same family. Golden files, the tune DB, and pins use the shortest unambiguous key.
+
+**Realize**
+A recorded configuration realizes when the current compiler offers an exact candidate matching it at the decision
+point. A record that realizes nowhere cannot be deployed, regardless of its stored measurement.
+
+**Candidate**
+One complete set of choices that the compiler could use.
+
+**Greedy selection**
+Choosing the candidate that currently appears best without exploring alternatives during normal compilation.
+
+**MCTS (Monte Carlo tree search)**
+A search method that treats decisions as a tree and balances trying promising branches with exploring less-tested ones.
+
+**Prior**
+In Emmy, a ranker that estimates which schedule will be fast before the current candidate is measured. The offline
+prior is fitted ahead of time by `emmy fit` on canonical goldens and ships with the repository; the online prior learns
+from local tuning measurements.
+
+**Trainer**
+An immutable object that turns candidate-pool data into a fitted model. `emmy fit --trainer linear` uses
+`LinearTrainer`; `--trainer catboost` uses `CatBoostTrainer`.
+
+**Blend**
+The named strategy that decides which prior half owns deployment ranking and how the halves influence MCTS selection.
+`EMMY_PRIOR_BLEND` selects it; the default uses the offline half until the online half is trustworthy.
+
+**Candidate pool**
+Every valid schedule row for one kernel. Pool members compute the same result and differ only in realization and speed;
+rows from different pools are not directly comparable.
+
+**Golden configuration**
+A persisted symbolic program target. Its `realizations` contain dimension bindings, input pins, schedule knobs, and,
+after verification, paired measurements for one exact GPU platform.
+
+**Realization**
+One statically bound or symbolic instance of a golden configuration: named bindings, input pins, selected schedule
+knobs, and optional measurements and ranking feedback.
+
+**Working golden file**
+A mutable local YAML inventory containing program targets, unverified realizations, proposals, and tuning feedback. It
+is search state, not trusted deployment evidence.
+
+**Canonical golden file**
+A reviewed per-GPU YAML in a recipe's `golden/` directory or the model-agnostic hardware-golden directory. Every
+realization has verified deployable measurements, and `emmy tune` refuses to mutate the file directly.
+
+**Child-identity schedule receipt**
+A realization that freezes structural cuts in its pins, records one resulting child kernel's schedule row, and stores
+that child's deploy identity. It lets verified evidence describe per-child schedules without flattening a kernel tree.
+
+**Evidence**
+A compatible recorded measurement used to select between schedule candidates.
+
+**Reservoir**
+The bounded sample of past tuning measurements stored inside the online-prior checkpoint. It trains the online model,
+and its compatible deployable rows are also a direct evidence tier.
+
+**Measurement freeze**
+A checksum- and vocabulary-pinned snapshot of node measurements used for reproducible evaluation. Unlike one machine's
+mutable tune DB or reservoir, the same freeze yields the same evaluation dataset wherever it is read.
+
+**Deploy evidence hierarchy**
+The fixed greedy-compile order: exact verified goldens, compatible reservoir measurements, compatible tune-DB `perf`
+rows, the prior prediction, and finally the rule's first emitted option when every other tier is silent.
+
+**Calibration**
+A check of whether a learned model ranks measured candidates well enough to influence compilation.
+
+**Regime**
+The compile settings under which a candidate is measured or deployed, especially nvcc optimization and fast-math pins.
+The default deployable regime is `-O3`; a measurement from another regime does not silently decide it.
+
+**Regret**
+The latency ratio between the candidate selected by a ranker and the fastest measured candidate in the same pool. A
+regret of `1.00` is best; `1.40` means the selected row was 40 percent slower.
+
+**Rank correlation**
+How closely a model's ordering follows measured ordering, from `+1` for identical order through `0` for no relationship.
+
+**Golden rank**
+The position of a verified realization in the prior's ordering of its candidate pool. It measures discoverability, not
+the realization's absolute speed.
+
+**Quarantine**
+The state in which an online model may continue learning but is not trusted to choose deployed schedules.
+
+**CatBoost**
+The machine-learning library Emmy uses for its online schedule-ranking model.
+
+**SQLite**
+A small database stored in one local file. Emmy uses it to persist tuning measurements.
+
+## Common mathematical terms
+
+**Matrix multiplication (matmul)**
+An operation that combines rows of one matrix with columns of another. It is one of the most important computations in
+machine learning.
+
+**RMSNorm (root mean square normalization)**
+An operation that rescales each row according to the root mean square of its values. It helps keep values at a stable
+scale inside many language models.
+
+**Softmax**
+An operation that converts a list of scores into positive values that sum to one. Models use it to turn scores into
+relative weights or probabilities.
+
+**Attention**
+A mechanism that lets each token combine information from other tokens. It uses matrix multiplication and softmax as
+major building blocks.
+
+**Associative operation**
+An operation for which grouping does not change the mathematical result, such as `(a + b) + c = a + (b + c)`.
+Associativity lets a reduction be split across parallel workers. Floating-point rounding means the bit-level result
+can still differ slightly.
+
+**Numerical precision**
+How accurately a number format represents real values. Faster or smaller data types can introduce more rounding error.

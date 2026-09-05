@@ -26,7 +26,7 @@ from emmy.compiler.ir.expr import Expr, Literal, SimplifyCtx, Var, affine_form
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt.base import Stmt
 from emmy.compiler.ir.stmt.blocks import Cond, Loop, StridedLoop
-from emmy.compiler.ir.stmt.body import Body, free_names
+from emmy.compiler.ir.stmt.body import Body, _exposed_defines, free_names
 from emmy.compiler.ir.stmt.leaves import Accum, Assign, Init, Load, Mma, Pack, Select, Unpack, Write
 
 # ---------------------------------------------------------------------------
@@ -692,13 +692,30 @@ def hoist_loop_invariants(stmts: Body) -> Body:
             return False
         return axis not in _axis_deps(s)
 
+    def _crossing_a_definition(inner: list[Stmt], hoisted: list[Stmt]) -> list[Stmt]:
+        """``hoisted`` less every stmt reading a name the loop body still BINDS.
+
+        Axis-invariance alone does not earn a hoist. A nested reduction can export an
+        accumulator that varies with none of the outer axes while its own loop stays pinned
+        (attention's denominator is produced inside the value sweep, which is pinned by the
+        head-dim axis the value slab reads). Its consumer then reads as invariant and moves
+        above the definition. Iterated: un-hoisting one candidate can pin the next."""
+        while hoisted:
+            ids = {id(c) for c in hoisted}
+            bound = {name for c in inner if id(c) not in ids for name in _exposed_defines(c)}
+            keep = [c for c in hoisted if not (free_names(c) & bound)]
+            if len(keep) == len(hoisted):
+                break
+            hoisted = keep
+        return hoisted
+
     def walk(body: Body) -> list[Stmt]:
         new_body: list[Stmt] = []
         for s in body:
             if isinstance(s, (Loop, StridedLoop)):
                 inner = walk(s.body)
                 axis = s.axis.name
-                hoisted = [c for c in inner if _hoistable(c, axis)]
+                hoisted = _crossing_a_definition(inner, [c for c in inner if _hoistable(c, axis)])
                 hoisted_ids = {id(c) for c in hoisted}
                 stay = [c for c in inner if id(c) not in hoisted_ids]
                 new_body.extend(hoisted)

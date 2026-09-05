@@ -357,13 +357,12 @@ class TileOp(Op):
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
 
+        # Only the kernel's SHARED output sweep — an axis every store rides — promotes: hoisting it replicates
+        # nothing but the statistics ahead of the sweep, while a sibling nest's axis would replicate every
+        # other nest per cell (DeepSeek-V4 post4096's root: four nests, a 2^56-cell grid).
         contractions = tuple(site.node for site in sites(normalized) if site.node.as_contraction() is not None)
-        promoted = {
-            axis.name
-            for store in self.output_specs
-            for axis in store.sweep
-            if any(any(axis.name in edge.free_axes for edge in con.operands) for con in contractions)
-        }
+        shared = set.intersection(*({axis.name for axis in store.sweep} for store in self.output_specs)) if self.output_specs else set()
+        promoted = {name for name in shared if any(any(name in edge.free_axes for edge in con.operands) for con in contractions)}
         if not promoted:
             self._own_axes()
             self._validate_schedule()

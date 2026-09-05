@@ -36,12 +36,6 @@ from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body, Load
 
-
-def is_blocked(axes) -> bool:
-    """Whether this kernel's axis table already carries a blocked stream (the re-firing receipt)."""
-    return any(axis.window is not None and axis.window.block for axis in axes)
-
-
 # ---- the split ------------------------------------------------------------------------------- #
 
 
@@ -343,17 +337,6 @@ def _blockable(fold: Fold, axis: Axis | None) -> bool:
     return axis.extent.is_static and axis.extent.as_static() > 1
 
 
-def block(fold: Fold, axis: Axis) -> tuple[Fold, tuple[Axis, ...]] | None:
-    """``fold`` blocked, or ``None`` when blocking would give it nothing.
-
-    Only a TWISTED carrier is blocked. A contraction's block is already spelled — ``bk`` says how
-    many atom K-steps one inner step consumes and the materializer chunks K by it — and a plain
-    reduction's partition is ``REDUCE``'s, with the cross-CTA split already factoring the axis.
-    Splitting either term would restate another family's decision as a shape.
-    """
-    return block_twisted(fold, axis)
-
-
 def block_tree(root: Fold, axes: tuple) -> tuple[Fold, tuple[Axis, ...]] | None:
     """Every root-most blockable stream of ``root``, blocked — or ``None`` when none is.
 
@@ -369,7 +352,7 @@ def block_tree(root: Fold, axes: tuple) -> tuple[Fold, tuple[Axis, ...]] | None:
         if id(term) in done:
             return done[id(term)]
         axis = table.get(term.axis) if term.axis is not None else None
-        got = block(term, axis) if _blockable(term, axis) else None
+        got = block_twisted(term, axis) if _blockable(term, axis) else None
         if got is not None:
             out, fresh = got
             installed.extend(fresh)

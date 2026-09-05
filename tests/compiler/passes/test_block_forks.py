@@ -18,7 +18,7 @@ from emmy.commands.trace import graph_from_code
 from emmy.compiler.context import Context
 from emmy.compiler.ir.schedule.classic_projection import project_classic
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.ir.tile.block import MAX_BLOCK, block, block_width, is_blocked
+from emmy.compiler.ir.tile.block import MAX_BLOCK, block_tree, block_twisted, block_width
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 
 _CTX = Context.from_target((12, 0))
@@ -78,10 +78,11 @@ def test_nothing_a_block_gives_nothing_to_is_blocked(code: str) -> None:
     weight itself, so nothing in it comes out bilinear and the block would buy a second pass over
     the stream for nothing."""
     tile = _tile(code)
-    assert not is_blocked(tile.axes)
+    assert block_tree(tile.op, tile.axes) is None
+    assert not any(axis.window is not None and axis.window.block for axis in tile.axes)
     for site in tile.sites:
         if site.node.axis is not None:
-            assert block(site.node, tile.axis_of(site.node.axis)) is None
+            assert block_twisted(site.node, tile.axis_of(site.node.axis)) is None
 
 
 def test_the_channels_share_one_binder_and_one_weight() -> None:
@@ -135,8 +136,6 @@ def test_the_block_lives_on_the_axes_and_only_there() -> None:
 def test_blocking_is_idempotent() -> None:
     """Every installed axis carries the receipt, so the pass fires once."""
     tile = _tile(_SDPA)
-    from emmy.compiler.ir.tile.block import block_tree  # noqa: PLC0415
-
     assert block_tree(tile.op, tile.axes) is None
 
 

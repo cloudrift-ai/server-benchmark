@@ -107,15 +107,23 @@ def _reads(fold: Fold, operands: tuple, reads) -> tuple[tuple[str, ...], tuple]:
     return tuple(param for param, index in zip(bound, at, strict=True) if index in keep), tuple(operands[i] for i in keep)
 
 
-def _reindexed(fold: Fold, sigma: Sigma) -> tuple:
-    """The fold's operand edges reading the block's ABSOLUTE coordinate.
+def _reindexed(fold: Fold, sigma: Sigma) -> tuple[Lambda, tuple]:
+    """The fold's LIFT and its operand edges, both reading the block's ABSOLUTE coordinate.
 
-    Only the operands move: the fold keeps its own binder over the narrowed axis, so nothing is
-    captured. ``_sliced_edge`` is the cross-CTA split's reindexer, and it is the same job — σ maps
+    The lift moves too, and it has to: the inner folds below bind the BLOCK's binder, not the
+    stream's, so every coordinate their bodies read has to be re-spelled over the block's pair.
+    Reindexing only the operands leaves a body that reads the stream coordinate directly — a causal
+    mask compares its key coordinate against the query's — reading a name the blocked kernel no
+    longer binds, and comparing the wrong coordinate if it did.
+
+    ``sliced_edge`` is the cross-CTA split's reindexer, and it is the same job on the edges — σ maps
     one coordinate onto an EXPRESSION over several, so a param's image is that expression's free
-    names rather than a rename.
+    names rather than a rename. The lift takes the same substitution and closes over what the
+    result still reads, so a coordinate the body took as a VALUE re-binds as the pair.
     """
-    return tuple(sliced_edge(edge, sigma, fold.axis) for edge in fold.operands)
+    body = Body(stmt.substitute(sigma) for stmt in fold.lift.body)
+    lift = Lambda.closing(fold.lift.params, body, fold.lift.results)
+    return lift, tuple(sliced_edge(edge, sigma, fold.axis) for edge in fold.operands)
 
 
 def _over_blocks(fold: Fold, outer: Axis, inner_folds: tuple[Fold, ...]) -> Fold:
@@ -180,24 +188,27 @@ def _pivot_and_rescales(fold: Fold) -> tuple[str, Assign, dict[int, str]] | None
     return head.op.name, head, betas
 
 
-def _beta_cone(fold: Fold, beta: str, pivot: Fold, m_blk: str, operands: tuple) -> Fold:
+def _beta_cone(fold: Fold, lift: Lambda, beta: str, pivot: Fold, m_blk: str, operands: tuple) -> Fold:
     """The per-element weight, as one shared zero-axis term.
 
     ``β`` is the factor the combine puts on the INCOMING side of a merge. Evaluated with the pivot
     bound to the BLOCK's pivot and the incoming side to this element's own value, it is exactly the
     element's weight within the block — attention's ``exp(s − m_blk)``, derived from the combine
     rather than restated. Shared by every channel, so the weight tile is computed once per block.
+
+    ``lift`` is the σ-reindexed one (:func:`_reindexed`): the score's cone lands in the channels'
+    loop, over the channels' binder.
     """
     states, others = fold.as_reduction().states, fold.combine.params[len(fold.as_reduction().states) :]
-    score = fold.lift.results[0]
+    score = lift.results[0]
     weight = fold.combine.cone(beta).rename({states[0]: m_blk, others[0]: score})
-    cone = fold.lift.cone(score)
+    cone = lift.cone(score)
     kept, edges = _reads(fold, operands, cone.params)
     body = Body((*cone.body, *weight.body))
     return Fold(operands=(*edges, pivot), lift=Lambda.closing((*kept, m_blk), body, (beta,)))
 
 
-def _channel(fold: Fold, index: int, weight: Fold, beta: str, operands: tuple, inner: Axis) -> Fold:
+def _channel(fold: Fold, lift: Lambda, index: int, weight: Fold, beta: str, operands: tuple, inner: Axis) -> Fold:
     """One channel's block contribution: ``⊕_{k_i} β · L``, where ``L`` is the fold's own lift
     result for that channel.
 
@@ -208,12 +219,12 @@ def _channel(fold: Fold, index: int, weight: Fold, beta: str, operands: tuple, i
     a tensor-core tile. That is the whole point of blocking.
     """
     state = fold.as_reduction().states[index]
-    carried = fold.lift.results[index]
-    const = fold.lift.body.definitions.get(carried)
+    carried = lift.results[index]
+    const = lift.body.definitions.get(carried)
     unit = const is not None and not isinstance(const, Assign) and getattr(const, "value", None) == 1.0
-    # The channel's own value cone, over the REINDEXED edges it reads: the fold's originals still
-    # read the un-split axis. A unit channel has no value to read at all.
-    value = Lambda.closing((), Body(()), ()) if unit else fold.lift.cone(carried)
+    # The channel's own value cone, off the REINDEXED lift and over the REINDEXED edges it reads:
+    # the fold's originals still read the un-split axis. A unit channel has no value to read at all.
+    value = Lambda.closing((), Body(()), ()) if unit else lift.cone(carried)
     kept, value_edges = _reads(fold, operands, value.params)
     edges, params = (weight, *value_edges), (beta, *kept)
     # Every channel exposes its OWN state name. A unit channel re-exposes the shared weight under
@@ -253,16 +264,16 @@ def block_twisted(fold: Fold, axis: Axis) -> tuple[Fold, tuple[Axis, ...]] | Non
     pivot_axis, pivot_sigma = _block_binder(axis, outer, width, "p")
     chan_axis, chan_sigma = _block_binder(axis, outer, width, "c")
 
-    lift, states = fold.lift, view.states
-    score = lift.results[0]
+    states = view.states
 
     # 1. The block pivot — the fold's own per-element pivot value under the pivot ⊕, over its own
     #    binder. Only the score's cone and the edges it reads: carrying the whole lift would bind
     #    the streamed value here too, and one slab bound in two sibling folds is one name declared
     #    twice in the emitted scope.
     m_blk = f"{states[0]}__blk"
-    pivot_edges = _reindexed(fold, pivot_sigma)
-    cone = lift.cone(score)
+    pivot_lift, pivot_edges = _reindexed(fold, pivot_sigma)
+    score = pivot_lift.results[0]
+    cone = pivot_lift.cone(score)
     kept, pivot_operands = _reads(fold, pivot_edges, cone.params)
     pivot = Fold(
         operands=pivot_operands,
@@ -282,9 +293,9 @@ def block_twisted(fold: Fold, axis: Axis) -> tuple[Fold, tuple[Axis, ...]] | Non
     #    independent accumulations over the same block, so they belong in one loop and the weight
     #    is computed once for all of them — two passes over a block, which is the fewest a pivot
     #    the weights read can be reached in. Only the PIVOT needs a binder of its own.
-    chan_edges = _reindexed(fold, chan_sigma)
-    weight = _beta_cone(fold, beta, pivot, m_blk, chan_edges)
-    channels = tuple(_channel(fold, index, weight, beta, chan_edges, chan_axis) for index in range(1, len(states)))
+    chan_lift, chan_edges = _reindexed(fold, chan_sigma)
+    weight = _beta_cone(fold, chan_lift, beta, pivot, m_blk, chan_edges)
+    channels = tuple(_channel(fold, chan_lift, index, weight, beta, chan_edges, chan_axis) for index in range(1, len(states)))
 
     # A block costs a second pass over the stream, and pays for it only by making a channel
     # BILINEAR. When none becomes a contraction — a plain online softmax, whose channels are sums

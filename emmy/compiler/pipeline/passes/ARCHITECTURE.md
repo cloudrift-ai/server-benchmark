@@ -82,7 +82,10 @@ axis it installs carries a `Window` receipt), so it opens no fork, adds no sched
 key to any row, and leaves one identity per term. The outer axis walks the stream's extent in
 strides (`Axis.step`) and each inner binder's extent IS the block, so the σ that reads the absolute
 coordinate stays `k_o + k_i` and no width enters the index arithmetic; `lower` renders the outer as
-the `StridedLoop` that already says exactly this.
+the `StridedLoop` that already says exactly this. A level binds the block's half of that pair, never
+the stream's, so the σ reaches everything the level reads — the operand edges' indices AND the lift
+BODIES, where attention's causal mask compares the stream coordinate against a free one directly
+rather than through a slab.
 
 Only a TWISTED carrier is blocked, because it is the only carrier a block gives anything, and only
 when a channel comes out of it BILINEAR. A contraction's block is already spelled: `bk` says how

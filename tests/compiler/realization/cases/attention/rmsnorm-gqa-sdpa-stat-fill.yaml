@@ -55,13 +55,13 @@ configs:
     knobs:
       PLACE: fuse
     identity: c0c2af1195acd28c8b1f4995bb4fdf51cf10664e358dd3bb9b3f2a346a94c749
-  - name: k_sdpa_rms_norm_reduce_baf6b4.e43185b73196.666d306acaab
+  - name: k_sdpa_rms_norm_reduce_baf6b4.e43185b73196.6b1ea08b812d
     bindings: {}
     pins:
       FAST_MATH: true
     knobs: {}
-    identity: 666d306acaabce9ac3cfdf4243aeaab39d2528d142fd4972a1dbad3f164a7a82
-  - name: k_sdpa_rms_norm_reduce_baf6b4.e43185b73196.b250c2f226ea
+    identity: 6b1ea08b812d507709d3cb6a983fa9b453cb7638190aee4e6307bdabf7faf77f
+  - name: k_sdpa_rms_norm_reduce_baf6b4.e43185b73196.8583a8087f54
     bindings: {}
     pins:
       FAST_MATH: true
@@ -83,4 +83,4 @@ configs:
       STAGE@map.1/twist.2/inner.1/map.1/inner: d1/smem
       WORK: w1x1
       RASTER: ''
-    identity: b250c2f226ea5ead82b679995d9bd8d30e76b259cdf4c850ae1d615cb68ddf99
+    identity: 8583a8087f54f914a152731a91f0b8726b2a54457d2b0b1c2fd97ad8420d2abc

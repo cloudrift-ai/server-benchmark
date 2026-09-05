@@ -560,3 +560,176 @@ def test_embedded_loop_pins_receive_greedy_output_reference(monkeypatch, tmp_pat
     assert exc.value.code == 1
     assert seen == {"want_ref": True}
     assert "requires same-input greedy outputs" in caplog.text
+
+
+def test_replay_keys_its_cache_by_the_entry_identity(tmp_path):
+    """Two entries of one set can spell the same row and pins on different kernels — a seam
+    spelling recurs on a residual as earlier cuts renumber its tree — and each replays its own
+    fork: the entry naming the kernel a fork is offered on reports the arm it spelled there, and a
+    same-spelled sibling naming another kernel reports none."""
+    from emmy.compiler.pipeline.search.golden import _replay, golden_record_from_entry, kernel_identity
+
+    path = tmp_path / "working-route.yaml"
+    document = _working_placement_route(path)
+    entry = document["configs"][0]
+    routing = golden_record_from_entry(document, entry, entry["realizations"][0])
+    owner = replace(routing, identity=kernel_identity(routing))
+    other = replace(owner, name="working.other", identity="f" * 64)
+
+    assert len(_replay(owner, siblings=(other,), lead=owner).arms) == 1
+    assert _replay(other, siblings=(owner,), lead=owner).arms == ()
+
+
+def test_recorded_greedy_pick_is_picked_again_under_strict_evidence(tmp_path):
+    """The kernel set a compile picked, recorded as measured rows — one routing row per kernel-set
+    decision it took and one child-identity schedule receipt per kernel — is evidence enough: those
+    rows alone yield the same kernels with the same rows under strict evidence, with no prior and
+    no tune DB. A receipt carries the input regime and no route: seam spellings are
+    kernel-local, so a cut key copied onto every receipt would re-cut any piece that offers a
+    same-spelled seam."""
+    from emmy import config
+    from emmy.compiler.pipeline import CUDA_PASSES, Pipeline
+    from emmy.compiler.pipeline.search.golden import (
+        GoldenEntryState,
+        golden_entry_state,
+        golden_record_from_entry,
+        records_override,
+        sole_evidence,
+    )
+    from emmy.compiler.pipeline.search.pins import pinned_knobs
+    from emmy.compiler.pipeline.search.working_golden import KernelSetDecisions, greedy_pick_rows, record_greedy_pick
+
+    path = tmp_path / "working-route.yaml"
+    document = _working_placement_route(path)
+    entry = document["configs"][0]
+    seed = golden_record_from_entry(document, entry, entry["realizations"][0])
+    ctx = Context.from_target((8, 9))
+    taken = KernelSetDecisions()
+    # The pick to record: the routing row decides the cut, the prior decides the pieces' schedules.
+    with records_override([seed]), pinned_knobs({"FAST_MATH": False}):
+        picked = Pipeline.build(CUDA_PASSES).with_strategies(taken).run(seed.target_program.copy(), ctx=ctx, db=None)
+    rows = greedy_pick_rows(picked)
+    # The routing row's cut first; the pieces may take further kernel-set decisions of their own
+    # (a cross-CTA split of the residual), each recorded as a routing row of its own kernel.
+    assert len(rows) >= 2 and taken.decisions[0][1] == {"PLACE@inner.1/map": "cut"}
+
+    written = record_greedy_pick(
+        path,
+        document,
+        "working.route",
+        decisions=[(identity, knobs, 5.0, 6.0) for identity, knobs in taken.decisions],
+        kernels=[(identity, row, 1.0, 2.0) for identity, row in rows],
+        reference_backend="same-input-greedy",
+    )
+
+    reloaded = load_golden_file(path)
+    added = [row for row in reloaded["configs"][0]["realizations"] if row["name"] in written]
+    assert len(added) == len(rows) + len(taken.decisions)
+    assert all(golden_entry_state(row) is GoldenEntryState.VERIFIED and row["identity"] for row in added)
+    assert all(row["pins"] == {"FAST_MATH": False} for row in added)
+    records = [golden_record_from_entry(reloaded, reloaded["configs"][0], row) for row in added]
+    with sole_evidence(records), pinned_knobs({"FAST_MATH": False}), config.strict_evidence_override(True):
+        again = Pipeline.build(CUDA_PASSES).run(seed.target_program.copy(), ctx=ctx, db=None)
+    assert greedy_pick_rows(again) == rows
+
+
+def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path):
+    """``run --golden PATH --realization NAME --bench --record-greedy``: the greedy row compiles with
+    the file's rows as its golden evidence (here the routing row, so the cut is taken), and after
+    the bench the kernel set it picked is written back as measured rows — a routing row per
+    kernel-set decision with the isolated whole-graph timing, a receipt per kernel with its
+    isolated launch timing, the greedy comparison row as every reference — while the per-kernel
+    perf rows and node leaves every embedded-golden bench records by default are recorded too."""
+    from emmy.commands import run as run_module
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler import target as target_mod
+    from emmy.compiler.pipeline.search.policy.greedy import _is_route_row
+
+    path = tmp_path / "working-route.yaml"
+    _working_placement_route(path)
+    args = _args(
+        path,
+        realization="working.route",
+        ir=None,
+        bench=True,
+        ab=None,
+        debug=False,
+        dump_dir=None,
+        bench_backends="emmy",
+        warmup=5,
+        iters=20,
+        seed=0,
+        json=None,
+        profile=False,
+        record=False,
+        record_greedy=True,
+        strict_correctness=False,
+    )
+    resolve_golden_arg(args)
+
+    def launches(graph, ms_per_launch):
+        n = len(run_module._launch_order_cuda_nodes(graph))
+        per_launch = [SimpleNamespace(idx=i, time_ms=ms_per_launch * (i + 1), samples=[ms_per_launch * (i + 1)]) for i in range(n)]
+        total = sum(launch.time_ms for launch in per_launch)
+        return SimpleNamespace(min_ms=total, time_ms=total, e2e_min_ms=None, captured=True, num_launches=n, per_launch=per_launch)
+
+    class FakeBackend:
+        name = "cuda"
+        tune_db = None
+        bench_compile_timeout_s = 1.0
+        bench_run_timeout_s = 1.0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        async def benchmark_compare_async(self, graph, **_kwargs):
+            return {
+                "results": {"Emmy": 1.0},
+                "result": launches(graph, 0.002),
+                "captured": True,
+                "torch_available": False,
+                "accuracy_error": None,
+                "run_io": ({"x": object()}, {"y": object()}),
+                "greedy_error": None,
+                "reference_run_us": None,
+            }
+
+        async def aclose_async_worker(self):
+            pass
+
+    class FakeDump:
+        @staticmethod
+        def resolve(_path):
+            return None
+
+    async def fake_isolated(_backend, compiled, *, warmup, iters):
+        sample = SimpleNamespace(name="greedy (isolated)", knobs={}, shape=None, dynamic=None)
+        return run_module._GoldenBench(sample, compiled, launches(compiled, 0.001), [], "ok")
+
+    async def fake_pinned(_backend, _source, _pins, **_kwargs):
+        return []
+
+    recorded = {}
+    monkeypatch.setattr(run_module, "_bench_greedy_isolated", fake_isolated)
+    monkeypatch.setattr(run_module, "_bench_golden_variants", fake_pinned)
+    monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(run_module, "_record_bench_evidence", lambda _args, benches, iso: recorded.update(benches=benches, iso=iso))
+    target_mod.set_target((8, 9))
+    try:
+        run_module._handle_run_ir(args, FakeBackend, FakeDump)
+    finally:
+        target_mod.set_target(None)
+
+    assert recorded["benches"] == [] and recorded["iso"].status == "ok"
+    added = load_golden_file(path)["configs"][0]["realizations"][1:]
+    routing = [row for row in added if _is_route_row(row["knobs"])]
+    receipts = [row for row in added if not _is_route_row(row["knobs"])]
+    assert routing[0]["knobs"] == {"PLACE@inner.1/map": "cut"} and len(receipts) >= 2
+    total = sum(range(1, len(receipts) + 1))
+    assert [row["measurements"] for row in routing] == [
+        {"emmy_us": pytest.approx(total * 1.0), "reference_us": pytest.approx(total * 2.0), "reference_backend": "same-input-greedy"}
+    ] * len(routing)
+    assert [row["measurements"] for row in receipts] == [
+        {"emmy_us": pytest.approx((i + 1) * 1.0), "reference_us": pytest.approx((i + 1) * 2.0), "reference_backend": "same-input-greedy"}
+        for i in range(len(receipts))
+    ]

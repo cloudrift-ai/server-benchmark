@@ -51,6 +51,8 @@ emmy trace Qwen/Qwen3-0.6B --layer 0 --dynamic seq_len@x:1 -o _tune/qwen3/workin
 emmy tune --golden _tune/qwen3/working.yaml --devices 0,1 --max-candidates 64
 # Bench every realization and record the measurements as deploy evidence (add --realization NAME to select one)
 emmy run --golden _tune/qwen3/working.yaml --bench --strict --json _tune/qwen3/results
+# Record the kernel set the greedy pick took for one realization as measured rows a strict compile picks again
+emmy run --golden _tune/qwen3/working.yaml --realization mlp.layer0 --bench --record-greedy
 # Capture one symbolic serving inventory with every release realization, then validate it on the pinned GPU
 emmy trace /models/gemma --serving-twins --serving-config docker/vllm-emmy-serve/models/gemma-4-12b-it.env \
   -o _tune/gemma/working.yaml

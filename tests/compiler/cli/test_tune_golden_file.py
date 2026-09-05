@@ -729,3 +729,47 @@ def test_multi_working_prepare_failure_cleans_command_temp_dump(tmp_path, monkey
         tune._tune_working_multi(args, [target], {"configs": []}, backends=[object()], db=object(), ctx=object(), run_id="r")
 
     assert not temp_dump.exists()
+
+
+def test_record_greedy_pick_appends_routing_rows_and_receipts_once(tmp_path, monkeypatch):
+    """The greedy pick's kernel set lands in the working file as measured realizations of the named
+    target: a routing row per kernel-set decision, its identity the kernel the fork was offered on,
+    and a child-identity schedule receipt per kernel — each verified with paired timings under the
+    seed's input regime. A re-record of a row already there replaces its timings instead of
+    duplicating it, and a canonical repository golden is never written."""
+    from emmy.compiler.pipeline.search import working_golden
+    from emmy.compiler.pipeline.search.golden import GoldenEntryState, golden_entry_state
+    from emmy.compiler.pipeline.search.working_golden import record_greedy_pick
+
+    path = tmp_path / "working.yaml"
+    dump_golden_file(_document(_matmul("mm", pins={"FAST_MATH": True})), path)
+    document = load_golden_file(path)
+    root, piece = "1" * 64, "a" * 64
+    decisions = [(root, {"PLACE@map.1/map": "cut"}, 30.0, 33.0)]
+    kernels = [(piece, _classic_row(work="w1x1"), 10.0, 11.0), ("b" * 64, {"WORK": "", "RASTER": ""}, 20.0, 22.0)]
+
+    written = record_greedy_pick(path, document, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy")
+
+    assert written == ["mm.111111111111", "mm.aaaaaaaaaaaa", "mm.bbbbbbbbbbbb"]
+    realizations = load_golden_file(path)["configs"][0]["realizations"]
+    assert [row["name"] for row in realizations] == ["mm", *written]
+    assert realizations[1] == {
+        "name": "mm.111111111111",
+        "bindings": {},
+        "pins": {"FAST_MATH": True},
+        "knobs": {"PLACE@map.1/map": "cut"},
+        "identity": root,
+        "measurements": {"emmy_us": 30.0, "reference_us": 33.0, "reference_backend": "same-input-greedy"},
+    }
+    assert realizations[3]["knobs"] == {"WORK": "", "RASTER": ""} and realizations[3]["measurements"]["emmy_us"] == 20.0
+    assert all(golden_entry_state(row) is GoldenEntryState.VERIFIED for row in realizations[1:])
+
+    kernels[0] = (piece, _classic_row(work="w1x1"), 9.0, 11.5)
+    assert record_greedy_pick(path, document, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy") == written
+    realizations = load_golden_file(path)["configs"][0]["realizations"]
+    assert [row["name"] for row in realizations] == ["mm", *written]
+    assert realizations[2]["measurements"] == {"emmy_us": 9.0, "reference_us": 11.5, "reference_backend": "same-input-greedy"}
+
+    monkeypatch.setattr(working_golden, "is_repository_golden_path", lambda _path: True)
+    with pytest.raises(ValueError, match="canonical repository golden"):
+        record_greedy_pick(path, document, "mm", decisions=decisions, kernels=kernels, reference_backend="same-input-greedy")

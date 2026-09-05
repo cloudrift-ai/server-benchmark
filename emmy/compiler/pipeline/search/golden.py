@@ -976,7 +976,10 @@ def _replay(
         f"lead:{sorted(_spelling(lead).items())}",
         *(f"{identity}:{sorted(_spelling(entry).items())}" for identity, entry in sorted(named.items())),
     )
-    cache_key = (_record_cache_key(record), record.pins, canonical_row_key(record.knobs), set_digest, exhaustive)
+    # The identity is part of the key: two entries of one set can spell the same row and pins on
+    # different kernels — a seam spelling recurs on a residual as earlier cuts renumber its tree —
+    # and each replays its own fork.
+    cache_key = (_record_cache_key(record), record.pins, canonical_row_key(record.knobs), record.identity, set_digest, exhaustive)
     cached = _REPLAY_CACHE.get(cache_key)
     if cached is not None:
         return cached

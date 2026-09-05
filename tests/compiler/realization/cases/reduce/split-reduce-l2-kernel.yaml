@@ -79,3 +79,21 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: e538d1fcd59d77eb0d38f554d0d598ba60fbaf51a2bc27059c4fa95f83e562a0
+  - name: k_sqrt_reduce.6fb6bdbaedda.5c201909268d
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 5c201909268d2f9eaf6c76bef02bcf06c9879b2c4f6c00d67aa63adfb23122ea
+  - name: k_sqrt_reduce.6fb6bdbaedda.aeb5069e34f4
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: aeb5069e34f46dcd8fd4b3d98391b042cec5fe6d8101e6ce75682898da8f0ddb

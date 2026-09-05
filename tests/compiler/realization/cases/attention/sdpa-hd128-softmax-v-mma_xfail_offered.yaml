@@ -72,6 +72,32 @@ configs:
       FAST_MATH: true
     knobs: {}
     identity: d3fd04f562bcfc86ef391ee5e22de8373759f0574d65ecf9d9f5f48c53a6bcbf
+  - name: k_sdpa_6a2bfa.0015e9065043.025b4fbf4e51
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      TILE@map.1/twist.1/reduce.1/inner: mma_m16n8k16_f16_f32/f1x8
+      TILE@map.1/twist.2/inner: mma_m16n8k16_f16_f32/f1x1/k4
+      TILE@map.1/twist.2/inner.1/map.1/inner: mma_m16n8k16_f16_f32/f1x8
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/reduce: ''
+      REDUCE@map.1/twist.1/reduce.1/inner: ''
+      REDUCE@map.1/twist.2/inner: ''
+      REDUCE@map.1/twist.2/inner.1/map.1/inner: ''
+      REDUCE@map.1/twist.3/reduce: ''
+      STAGE@map.1/twist.1/reduce.1/inner: ''
+      STAGE@map.1/twist.2/inner: d1/smem
+      STAGE@map.1/twist.2/inner.1/map.1/inner: ''
+      WORK: w1x1
+      RASTER: ''
+    identity: 025b4fbf4e511ca517ca867a23eb3cd1141c6a9b66376c5d54c964decadc6c80
+  - name: k_sdpa_6a2bfa.0015e9065043.531615f1b378
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs: {}
+    identity: 531615f1b378d5298389389a2c97f470fdf97ec6be88a52e06313465c606a087
 loops:
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]

@@ -84,3 +84,20 @@ configs:
       WORK: ''
       RASTER: ''
     identity: a56dff37806623dabbd361868dd47db7657965a6ba6a258d86830f6c090cb6fa
+  - name: k_linear_8d3203.9ef9fbbaebed.28e29891440a
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 28e29891440ac8715c7a89f32473f8a3aa6b77c70d17943b9139c45d3e01df0e
+  - name: k_linear_8d3203.9ef9fbbaebed.a5500c65a4d5
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      RASTER: ''
+    identity: a5500c65a4d549c88e3563ee43b6fb07b7039a247c29b0bcdbd587c2c415d3aa

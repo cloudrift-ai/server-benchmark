@@ -76,3 +76,12 @@ configs:
       TILE: ''
       RASTER: ''
     identity: 26403e7a8357284952a48d53a0c9c7f910513864f4ff4325f5c1b932549bbc77
+  - name: k_softmax_e98f25.a1edcd8e45de.b958717f488c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      RASTER: ''
+    identity: b958717f488ce8f39bc002db884b687658b85a5d8c46a46570ba87725ad9cce5

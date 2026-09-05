@@ -62,3 +62,14 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 8e61168eae46d5213d2365090e41ba59940a298dc29923b3c234f8f5ca57ee8b
+  - name: k_matmul_619b7e.dfdfde01fe27.fbadcc22f49c
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      TILE: ''
+      REDUCE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: fbadcc22f49cfafbc9f3e30595289cd9c982be3153018900c882ed3ce3f27cc6

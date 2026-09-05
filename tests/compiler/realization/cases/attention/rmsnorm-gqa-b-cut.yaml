@@ -93,3 +93,12 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: 4f945d7d7031c4985d560bb2133fee812e8f88229bbb3a1fd7727ee19f4a2a03
+  - name: k_sdpa_rms_norm_reduce_4bbb9f.e741386042ca.8bc4eb71e336
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 8bc4eb71e3367f96e1d7eefc3414080f1dbe7ec5a75ec1acfb635f5aea8c8130

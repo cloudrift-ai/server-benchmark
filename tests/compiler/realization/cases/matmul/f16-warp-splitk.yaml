@@ -54,3 +54,12 @@ configs:
       REDUCE: ''
       RASTER: ''
     identity: fbdbd596e0b91dd2a2dc3018c6a3d8ee21fb1b4613d5c57dba027b5c9be98688
+  - name: k_matmul_903e16.a59a511c081c.c9b2232c27b0
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: c9b2232c27b041f845fb4bf64369ab1aacca07ae27db6c06fc7cfa99cb126748

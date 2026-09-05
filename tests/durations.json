@@ -367,6 +367,7 @@
  "tests/compiler/passes/test_placement_routing.py::test_rms_norm_fused_pin_lowers_one_kernel": 0.07,
  "tests/compiler/passes/test_placement_routing.py::test_scoped_cut_preserves_every_multi_output_parent_port": 2.54,
  "tests/compiler/passes/test_schedule_space_separation.py::test_an_axis_renamed_twin_preserves_the_node_id_vocabulary": 4.58,
+ "tests/compiler/passes/test_schedule_space_separation.py::test_an_off_precision_gate_stamps_the_same_space": 5.0,
  "tests/compiler/passes/test_schedule_space_separation.py::test_split_dim_store_does_not_share_an_identity": 15.13,
  "tests/compiler/passes/test_schedule_space_separation.py::test_transposed_free_extents_stamp_different_spaces": 20.92,
  "tests/compiler/passes/test_schedule_walk.py::test_computed_fold_sites_are_keyed_schedule_sites[flash_pair-2-3]": 35.36,

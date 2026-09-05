@@ -96,11 +96,24 @@ def scheduled_fold_contraction(fold: Fold, sched):
     if fold.combine is None or fold.axis is None or len(fold.operands) != len(fold.combine.results):
         return None
     for child in fold.operands:
-        if child.axis is None or child.as_contraction() is None:
+        if child.axis is None or child.as_contraction() is None or len(child.operands) != 2:
             continue
         tile = sched.tile_of(child)
         stage = sched.get("STAGE", child) if tile is not None else None
         if tile is None or not tile.is_warp or stage is None or stage.transport != "smem":
+            continue
+        # The block's SCORE — the contraction the weight cone reads — has to land in fragments
+        # too: the pivot's own pass over the block is a row reduce of those, which is what makes
+        # the score one pass rather than two. Its fragment grid must cover the chunk the channel
+        # drains, and the chunk must be the block the term spells — the enumeration offers exactly
+        # these (``_block_refusal``), and reading them here keeps a row it did not offer from
+        # reaching the binder.
+        block = sched.axis_of(child.axis)
+        producer = next((edge for edge in child.operands[0].operands if edge.as_contraction() is not None), None)
+        plan = sched.tile_of(producer) if producer is not None else None
+        if plan is None or not plan.is_warp or sched.get("STAGE", producer) is None:
+            continue
+        if stage.bk_elems != block.extent.as_static() or plan.n.reg * plan.atom.atom_n != stage.bk_elems:
             continue
         return child, tile, stage
     return None
@@ -2151,15 +2164,23 @@ def _carrier_values(fold: Fold, ops: _AtomOps, cells, frag_index: int) -> tuple[
     return decls, values
 
 
-def _projection_finalize(tail: tuple, carried: dict[str, Value], target: Value) -> list[Stmt]:
-    """Evaluate a pure post-fold projection at carrier residence and place it in ``target``."""
+def _projection_finalize(tail: tuple, carried: dict[str, Value], target: Value, bases, axes: tuple[str, str]) -> list[Stmt]:
+    """Evaluate a pure post-fold projection at carrier residence and place it in ``target``.
+
+    ``bases`` / ``axes`` are the OUTPUT tile's cell bases and its ``(m, n)`` coordinate names: a
+    projection may read gmem at the output cell (a residual, a bias), and such a load is one value
+    per fragment element, not one per thread — without them it would emit at the raw grid
+    coordinates, which the tiling has already replaced.
+    """
     writes = [stmt for stmt in tail if isinstance(stmt, Write)]
     pure = [stmt for stmt in tail if not isinstance(stmt, Write)]
     if not writes or not pure:
         return []
     result = writes[0].value
-    lam = Lambda(params=tuple(carried), body=Body(tuple(pure)), results=(result,))
-    body, (value,), _ = evaluate(lam, carried)
+    # ``closing``, not the bare former: the coordinates such a load reads bind as trailing params
+    # like any other name the body does not define.
+    lam = Lambda.closing(tuple(carried), Body(tuple(pure)), (result,))
+    body, (value,), _ = evaluate(lam, carried, bases=bases, axes=axes, bounds=())
     if value.kind != FRAG or target.kind != FRAG:
         raise ValueError("a fragment-resident Fold projection must produce fragments")
     body.extend(
@@ -2180,14 +2201,15 @@ def _reclosed(term: Fold) -> Fold:
     """``term`` with every lambda RE-CLOSED, so its trailing coordinate params are in canonical
     order again.
 
-    A rewrite renames params in place; :meth:`Lambda.closing` orders the ones it appends. Two terms
+    A rewrite renames params in place; the former orders the trailing ones it appends. Two terms
     that differ only in the order a rename left them in are the same term — which is exactly what
     the pivot's copy of a block's score and the weight's are, once both binders are spelled as the
-    stream they walk.
+    stream they walk. A rename that collides two of them leaves one, which is the same reading.
     """
     lead = ((term.axis,) if term.axis is not None else ()) + tuple(param for param, _, _ in term.bindings)
+    trailing = tuple(sorted(dict.fromkeys(term.lift.params[len(lead) :])))
     operands = tuple(_reclosed(edge) for edge in term.operands)
-    return replace(term, operands=operands, lift=Lambda.closing(lead, term.lift.body, term.lift.results))
+    return replace(term, operands=operands, lift=replace(term.lift, params=(*lead, *trailing)))
 
 
 def _fold_staged(
@@ -2491,7 +2513,8 @@ def _fold_staged(
         lead=lead_segment,
     )
     target = carried[fragment_state]
-    return pre, [*region, *_projection_finalize(projection, carried, target)]
+    out_bases = tuple(tuple((offset[0].base(i), offset[1].base(j)) for j in range(n.reg)) for i in range(m.reg))
+    return pre, [*region, *_projection_finalize(projection, carried, target, out_bases, (m.axis.name, n.axis.name))]
 
 
 def reduce_codegen(

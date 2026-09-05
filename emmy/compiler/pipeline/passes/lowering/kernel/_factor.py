@@ -796,9 +796,7 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     trips = axis.trips
     stride = coop * reg * step
     masked = reg > 1 and not (trips is not None and trips % (coop * reg) == 0)
-    start = BinaryExpr("*", Var(lane.name), Literal(step, "int")) if lane is not None and step > 1 else Var(lane.name)
-    if lane is None:
-        start = Literal(0, "int")
+    start = Literal(0, "int") if lane is None else BinaryExpr("*", Var(lane.name), Literal(step, "int")) if step > 1 else Var(lane.name)
 
     # The reduce loop: ``reg`` interleaved accumulator chains (ILP), striding the axis by
     # ``coop·reg`` from the lane's start. The dissolved fold ``Accum``\\ s seed each copy's

@@ -72,9 +72,10 @@ def sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | Non
 
 #: The widest block a stream is cut into. A block is a WORKING SET: the pivot's pass has to reach
 #: the end of it before the channels may start, so every value the channels then read against that
-#: pivot has to still be in registers — which is what bounds it, and 128 columns is the widest
-#: fragment grid the tensor-core catalog tiles a contraction's output to.
-MAX_BLOCK = 128
+#: pivot is still in registers when they do — which is what bounds it. 64 is the widest column
+#: grid the warp catalog covers a contraction's output with (eight register columns of an
+#: eight-wide atom), and a block no fragment grid covers is a block no tensor core can take.
+MAX_BLOCK = 64
 
 
 def block_width(extent: int) -> int | None:

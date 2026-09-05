@@ -15,6 +15,8 @@ file pins the catalog's **legal set** three ways:
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
 from emmy.compiler.graph import Graph, Tensor
@@ -26,7 +28,7 @@ from emmy.compiler.ir.schedule import Reduce, Tile, Work, derive_workers, resolv
 from emmy.compiler.ir.schedule.catalog import MAX_BLOCK_THREADS as _MAX_BLOCK_THREADS
 from emmy.compiler.ir.schedule.catalog import coop_reduce_moves, scalar_tile_moves
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.ir.tile import Placement, TileOp
+from emmy.compiler.ir.tile import Placement, TileOp, blockify
 from emmy.compiler.pipeline import TILE_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
 from emmy.compiler.pipeline.knob import axis_of, complete_kernel_row, family_of, family_value, is_off_value
@@ -249,6 +251,8 @@ def _rows_of(tile, ctx=None) -> list[dict]:
     from importlib import import_module
 
     classic_forks = import_module("emmy.compiler.pipeline.passes.lowering.tile.040_schedule").classic_forks
+    if not tile.blocks:
+        tile = replace(tile, blocks=blockify(tile))
     out = classic_forks(tile, "k", {}, ctx or Context.from_target((12, 0)))
     return [dict(leaf.knobs) for leaf in iter_leaves(out)]
 

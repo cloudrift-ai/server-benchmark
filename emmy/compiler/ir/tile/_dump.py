@@ -219,6 +219,29 @@ def _pretty_place(tile) -> list[str]:
     return out
 
 
+def _pretty_blocks(tile) -> list[str]:
+    """The stored symbolic axis decomposition and its schedule binding, when decided."""
+    if not tile.blocks:
+        return []
+    widths = {}
+    if tile.schedule is not None:
+        schedule = sched_of(tile)
+        for site, choice in tile.schedule.nodes.items():
+            geometry = tile.materialization.tiles.get(site) if tile.materialization is not None else None
+            stage = schedule.get("STAGE", tile.sites[site].node)
+            widths.update((claim.parameter, claim.width) for claim in tile.blocks[site].claims(choice, geometry, stage))
+    rows = []
+    for blocks in tile.blocks:
+        entries = list(blocks.output)
+        if blocks.reduce is not None:
+            entries.append(blocks.reduce)
+        for block in entries:
+            bound = f" = {widths[block.parameter]}" if block.parameter in widths else ""
+            levels = " × ".join(block.levels)
+            rows.append(f"{block.parameter}{bound}: {block.axis.name} → {levels}")
+    return _pretty_region("blocks", rows)
+
+
 def tile_body(tile) -> str:
     """Render the kernel structurally (the dump view) — no lowering and nothing derived: the
     caller facts that live beside the term (``place`` / ``workers`` / ``classic.kernel.work``), then the stored
@@ -229,6 +252,7 @@ def tile_body(tile) -> str:
     if tile.op is None:
         return ""
     lines = [f"    {line}" for line in _pretty_place(tile)]
+    lines += _pretty_blocks(tile)
     lines += pretty(tile.op, "    ", tile=tile)
     outputs = [
         f"{f'sweep({".".join(axis.name for axis in spec.sweep)}) ' if spec.sweep else ''}{line.strip()}"

@@ -51,6 +51,7 @@ from emmy.compiler.ir.schedule.views import (
 )
 from emmy.compiler.ir.stmt import Body, Load, Loop, OutputSpec, Stmt, Write
 from emmy.compiler.ir.stmt.body import free_names
+from emmy.compiler.ir.tile.block import BlockAxis, SiteBlocks
 from emmy.compiler.ir.tile.normalize import normalize_fold_tree
 from emmy.compiler.ir.tile.path import Site, sites
 
@@ -321,6 +322,9 @@ class TileOp(Op):
     # free axes, each reduce axis, a split's slice and partition, a sweep. The term itself carries
     # names only; this is the domain it is evaluated on, and ``Fold.lower`` takes it whole.
     axes: tuple[Axis, ...] = ()
+    # The explicit symbolic block domain, one entry per Fold site. It is installed before
+    # scheduling and contains no chosen widths; the existing schedule families bind it.
+    blocks: tuple[SiteBlocks, ...] = ()
     workers: WarpSpec | None = None
     # The accepted semantic assignment and its derived lowering facts. Unscheduled Tile IR carries
     # neither; scheduling installs both together.
@@ -356,6 +360,8 @@ class TileOp(Op):
         if self.schedule is not None and normalized != self.op:
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
+        if self.blocks and (len(self.blocks) != len(self.sites) or any(not isinstance(block, SiteBlocks) for block in self.blocks)):
+            raise ValueError("TileOp blocks must contain one SiteBlocks value per Fold site")
 
         # Only the kernel's SHARED output sweep — an axis every store rides — promotes: hoisting it replicates
         # nothing but the statistics ahead of the sweep, while a sibling nest's axis would replicate every
@@ -587,6 +593,12 @@ class TileOp(Op):
             return next(axis for axis in self.axes if axis.name == name)
         except StopIteration:
             raise KeyError(f"axis {name!r} is not in this kernel's axis table {[axis.name for axis in self.axes]}") from None
+
+    def blocks_of(self, node) -> SiteBlocks:
+        """The symbolic block domain declared for ``node``."""
+        if not self.blocks:
+            raise ValueError("TileOp has not been blockified")
+        return self.blocks[self.node_id(node)]
 
     def _body_identity(self, *, structural: bool = True) -> str | None:
         """Override :meth:`Op._body_identity` with the DERIVED body: :attr:`loop_body`'s

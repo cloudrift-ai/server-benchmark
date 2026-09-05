@@ -2,7 +2,7 @@
 
 import json
 import pickle
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from itertools import permutations
 
 import pytest
@@ -46,7 +46,7 @@ from emmy.compiler.ir.schedule.classic import (
     parse_node_id,
 )
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.tile import TileOp, blockify
 from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves, schedule_forks
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from tests.compiler.helpers import classic_cartesian_assignments, enumerate_classic_reference
@@ -71,6 +71,7 @@ def _problem(root: Fold, target=None) -> tuple[TileOp, object]:
     """The ``(tile, target)`` problem the schedule model tests compose over."""
     m, n = Axis("m", 8), Axis("n", 8)
     tile = TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, _K))
+    tile = replace(tile, blocks=blockify(tile))
     return tile, Context.from_target((12, 0)) if target is None else target
 
 
@@ -176,7 +177,8 @@ def test_independent_nodes_compose_only_at_matching_physical_axis_geometry() -> 
     first = contraction(k1, Load("a1", "a1", (Var("m"), Var("k1"))), (Load("b1", "b1", (Var("k1"), Var("n"))), "left"))
     second = contraction(k2, Load("a2", "a2", (Var("n"), Var("k2"))), (Load("b2", "b2", (Var("k2"), Var("m"))), "right"))
     root = projection((first, second), (), ("left", "right"))
-    problem = (TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k1, k2)), Context.from_target((12, 0)))
+    source = TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k1, k2))
+    problem = (replace(source, blocks=blockify(source)), Context.from_target((12, 0)))
 
     def pick(context, node, choice):
         site = context.site(node)
@@ -333,6 +335,7 @@ def test_an_authored_tile_bypasses_enumeration_precision_policy() -> None:
         inputs={"a": Tensor("a", (8, 16), "f16"), "b": Tensor("b", (16, 8), "f16")},
         outputs={"out": Tensor("out", (8, 8), "f16")},
     )
+    source = replace(source, blocks=blockify(source))
     problem = (source, Context.from_target((12, 0)))
     base = ClassicScheduleContext(*problem)
     site = base.tile_op.node_sites[0]
@@ -613,6 +616,7 @@ def test_tile_requires_complete_materialization() -> None:
             op=root,
             place=Placement(free=(m, n)),
             axes=(m, n, _K),
+            blocks=context.tile_op.blocks,
             schedule=schedule,
             materialization=ClassicMaterialization({}, {}),
         )
@@ -622,6 +626,7 @@ def test_tile_requires_complete_materialization() -> None:
             op=root,
             place=Placement(free=(m, n)),
             axes=(m, n, _K),
+            blocks=context.tile_op.blocks,
             schedule=schedule,
             materialization=ClassicMaterialization({site: placed, site + 1: placed}, {}),
         )
@@ -645,6 +650,7 @@ def test_tile_graph_round_trip_uses_the_strict_schedule_codec() -> None:
         name="classic",
         place=Placement(free=(m, n), grid=(m, n), mapped=True),
         axes=(m, n, _K),
+        blocks=context.tile_op.blocks,
         schedule=schedule,
         materialization=ClassicMaterialization({site: plan.at(m, n)}, {}),
     )

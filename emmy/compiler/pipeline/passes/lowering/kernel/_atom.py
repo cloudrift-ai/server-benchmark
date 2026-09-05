@@ -59,6 +59,7 @@ from emmy.compiler.ir.schedule.packing import block_scaled_atom, packed_readings
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.stmt.passes import rename_free, rewrite
+from emmy.compiler.ir.tile.block import BoundBlockAxis
 from emmy.compiler.ir.tile.ops import cone_stat, cone_stat_dtypes, make_cone
 from emmy.compiler.pipeline.passes.lowering.kernel._eval import Value, evaluate
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
@@ -75,7 +76,6 @@ from emmy.compiler.pipeline.passes.lowering.kernel._stage import (
     staged_kloop,
     sync_stat_fill,
 )
-from emmy.compiler.pipeline.passes.lowering.kernel._tiling import AxisOffset
 from emmy.compiler.pipeline.search.space import UNROLL
 
 #: The contraction semiring — multiply ⊗ then accumulate ⊕ (add). The same multiply-add ``mma.sync``
@@ -108,7 +108,8 @@ def scheduled_fold_contraction(fold: Fold, sched):
         # drains, and the chunk must be the block the term spells — the enumeration offers exactly
         # these (``_block_refusal``), and reading them here keeps a row it did not offer from
         # reaching the binder.
-        block = sched.axis_of(child.axis)
+        block = sched.block_of(child).reduce
+        assert block is not None
         producer = next((edge for edge in child.operands[0].operands if edge.as_contraction() is not None), None)
         plan = sched.tile_of(producer) if producer is not None else None
         if plan is None or not plan.is_warp:
@@ -119,7 +120,7 @@ def scheduled_fold_contraction(fold: Fold, sched):
         # to the ordinary tiers; letting it through asserts inside the atom.
         if producer.operands[0].as_slab() is None:
             continue
-        if stage.bk_elems != block.extent.as_static() or plan.n.reg * plan.atom.atom_n != stage.bk_elems:
+        if plan.n.reg * plan.atom.atom_n != block.width:
             continue
         return child, tile, stage
     return None
@@ -310,7 +311,7 @@ def _staged_inner_atom_loop(
     slabs: tuple[str, ...],
     mn: tuple[Side, Side],
     atom,
-    bk_elems,
+    block: BoundBlockAxis,
     ki,
     reg_depth: int = 1,
     offs=None,
@@ -371,8 +372,12 @@ def _staged_inner_atom_loop(
     byte_slabs = byte_slabs if byte_slabs is not None else (False,) * len(slabs)
     pads = pads if pads is not None else (0,) * len(slabs)
     scales = scales if scales is not None else (None,) * len(slabs)
-    atom_m, atom_n, atom_k = atom.shape
-    n_steps = bk_elems // atom_k
+    atom_m, atom_n, expected_atom_k = atom.shape
+    bk_elems = block.width
+    atom_k = block.factor("atom")
+    if atom_k != expected_atom_k:
+        raise ValueError(f"the bound ATOM K width is {atom_k}, expected {expected_atom_k} for {atom.name}")
+    n_steps = block.factor("tile")
     # Per-operand drain spec: (frag base fn, slab, ldm, tile-is-slab-row, reg count, warp-unit var,
     # atom dim, slot row off, swizzle, byte flag). A stacks the tile axis on the slab row (K the
     # col); B swaps (K the row, tile the col) — unless its slab is transposed (N-major: tile the
@@ -523,7 +528,7 @@ def clamp_last(idx: Expr, ext: Expr) -> Expr:
 def _side_base(side: Side) -> Expr:
     """The CTA's tile-base coordinate on ``side`` — ``block·tile`` (always in-bounds: the block
     count is ``ceil(extent / tile)``, so ``block·tile < extent``)."""
-    return BinaryExpr("*", Var(side.block), Literal(side.tile, "int"))
+    return side.cta_base
 
 
 def _sibling_sigma(sibling: Side | None) -> dict[str, Expr]:
@@ -794,12 +799,14 @@ def _child_contraction_block(
     *,
     child: Fold,
     tile: Tile,
+    mn: tuple[Side, Side],
     k0: Expr,
     lead: tuple,
     ns: str,
     epilogue=None,
     slabs: tuple = (None, None),
     child_k: Axis,
+    block: BoundBlockAxis,
     axes: tuple = (),
 ):
     """One scheduled contraction block producing fragments for an enclosing Fold.
@@ -816,17 +823,27 @@ def _child_contraction_block(
     The rows are the enclosing tile's own, warp-partitioned and absolute; the columns are the
     enclosing block. Returns ``(ops, cells, offset, mn, stmts, frags)`` with ``frags[i]`` the
     register row ``i``'s column fragments in column order."""
-    m, n = tile.mn
-    ops = _atom_ops(child, tile, epilogue=epilogue, lead=lead, frag_ns=ns, slabs=slabs, k_axis=child_k, axes=axes)
+    m, n = mn
+    ops = _atom_ops(
+        child,
+        tile,
+        epilogue=epilogue,
+        lead=lead,
+        frag_ns=ns,
+        slabs=slabs,
+        k_axis=child_k,
+        block=block,
+        axes=axes,
+    )
     offset = (
-        AxisOffset(atom_dim=tile.atom.atom_m, reg=m.reg, block_var=m.block, unit_var=m.unit, unit_count=m.units),
+        m,
         _BlockCols(atom_dim=tile.atom.atom_n, k0=k0),
     )
     cells = [(i, j) for i in range(m.reg) for j in range(n.reg)]
     decls = list(ops.state(cells))
-    _, region = ops.reduce(cells, offset, tile.mn)
+    _, region = ops.reduce(cells, offset, mn)
     frags = tuple(tuple(ops.frag(f"_c{i}_{j}") for j in range(n.reg)) for i in range(m.reg))
-    return ops, cells, offset, tile.mn, [*decls, *region], frags
+    return ops, cells, offset, mn, [*decls, *region], frags
 
 
 def _a_slab_operand(
@@ -1248,12 +1265,12 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
     the store guard."""
     c, stage, tile = ops.c, ops.stage, ops.tile
     k_axis = ops.k_axis
-    # The chunk stream. A static K unrolls a literal chunk count; a SYMBOLIC one hands the skeleton
-    # its ``Dim`` and the runtime ``ceil(K / bk)`` — the fill masks the last chunk's tail to the
-    # fold identity (:func:`_k_masked`), so the drain still reads whole chunks.
-    bk, static_k = stage.bk_elems, k_axis.extent.is_static
-    K = k_axis.extent.as_static() if static_k else k_axis.extent
-    n_chunks = K // bk if static_k else Dim(BinaryExpr("/", BinaryExpr("+", K.expr, Literal(bk - 1, "int")), Literal(bk, "int")))
+    block = ops.block
+    if block is None:
+        raise ValueError("a staged contraction requires its Tile IR K block")
+    bk = block.width
+    if bk != stage.bk_elems:
+        raise ValueError(f"the bound K block is {bk} elements but STAGE resolved {stage.bk_elems}")
     elem = ops.slab_elem()
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
     finalize: list[Stmt] = []
@@ -1267,7 +1284,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         operands, copies, fills = _block_scaled_operands(
             c,
             bs_pair,
-            stage.bk_elems,
+            bk,
             mn,
             ops.inputs[bs_pair.b[0].bits.input].dtype,
             ops.inputs[bs_pair.a.scale.input].dtype,
@@ -1325,7 +1342,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         operands, sync_ops, async_ops, packed_pro = _packed_operands(
             c,
             packed,
-            stage.bk_elems,
+            bk,
             mn,
             ops.slab_swizzles(mn, elem.nbytes)[0],
             ops.inputs[packed.bits.input].dtype,
@@ -1350,9 +1367,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             return pipelined_kloop(
                 operands=((copies, stage.depth), (fill, 1)),
                 build_segments=lambda slots: [(ops.staged_drain(operands, slots[0], cells, offset, mn), slabs)],
-                bk_elems=stage.bk_elems,
-                n_chunks=K // stage.bk_elems,
-                k_extent=K,
+                block=block,
             )
         # cp.async: one ``sync`` producer whose copied peers are the two copied slabs — the
         # same shape the fused norm→linear edge takes.
@@ -1363,7 +1378,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         # that work — with ``cp.async``, or with the blocking vector copy on an atom whose target
         # has none. A term with no inline edge at all lands here too: then it is only the copy.
         operands, sync_ops, copy_ops, stat_pro = _sync_operands(
-            c, stage.bk_elems, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone, ops.inputs, k_axis=k_axis, axes=ops.axes
+            c, bk, mn, cta, ops.slab_swizzles(mn, elem.nbytes), ops.channels, ops.cone, ops.inputs, k_axis=k_axis, axes=ops.axes
         )
         transport = SyncTransport(
             operands=sync_ops,
@@ -1386,7 +1401,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
             bufs=(c.operands[0].as_slab().load.input, c.operands[1].as_slab().load.input),
             mn=mn,
             k_axis=k_axis,
-            bk_elems=stage.bk_elems,
+            bk_elems=bk,
             base=_tile_base(mn),
             swizzles=ops.slab_swizzles(mn, elem.nbytes),
             elems=elems,
@@ -1408,9 +1423,7 @@ def _staged(ops: _AtomOps, cells, offset, mn: tuple[Side, Side]):
         transport=transport,
         drain=drain,
         depth=stage.depth,
-        bk_elems=bk,
-        n_chunks=n_chunks,
-        k_extent=K,
+        block=block,
         workers=ops.workers,
         block_threads=tile.launch_threads,
     )
@@ -1629,11 +1642,21 @@ class _AtomOps:
     # The contraction's K with its extent and the kernel's axis table: the term names its axes,
     # the kernel holds them, and every open-body lowering of an operand here takes the table.
     k_axis: Axis | None = None
+    # The explicit K block declared by Tile IR and bound by the schedule. Staging and the atom
+    # drain consume this object; neither reconstructs a chunk width from TILE or STAGE.
+    block: BoundBlockAxis | None = None
     axes: tuple = ()
 
     def frag(self, name: str) -> str:
         """``name`` in this emission's fragment namespace (:attr:`frag_ns`)."""
         return f"{self.frag_ns}{name}"
+
+    @property
+    def block_width(self) -> int:
+        """The explicit Tile IR K-block width consumed by this emission."""
+        if self.block is None:
+            raise ValueError("a tiled contraction requires its Tile IR K block")
+        return self.block.width
 
     @property
     def channels(self) -> tuple:
@@ -1710,7 +1733,7 @@ class _MmaOps(_AtomOps):
             offs=tuple(op.slot_row(slot) for op in operands),
             mn=mn,
             atom=self.tile.atom,
-            bk_elems=self.stage.bk_elems,
+            block=self.block,
             ki="_ki",
             reg_depth=self.stage.reg_depth,
             swizzles=tuple(getattr(op, "swizzle", "NONE") for op in operands),
@@ -1728,7 +1751,7 @@ class _MmaOps(_AtomOps):
         """The drain's ``(scale slab, its row stride, the k block)`` for a PACKED-PAIR operand, or
         ``None``. The stride is the chunk's block count — the scale slab is ``tile × bk/block``."""
         scale = getattr(op, "scale", None)
-        return None if scale is None else (scale[0], self.stage.bk_elems // scale[1], scale[1])
+        return None if scale is None else (scale[0], self.block_width // scale[1], scale[1])
 
     def slab_swizzles(self, mn, elem_bytes: int) -> tuple[str, str]:  # noqa: ARG002 — per-operand widths come from slab_elems
         """The smem swizzle mode per operand slab, from each slab's inner (contiguous) row
@@ -1748,7 +1771,7 @@ class _MmaOps(_AtomOps):
         b16-indexed); the cp.async byte slab's bank spread is the row pad instead."""
         if self.tile.atom.fragment_layout == "m8n8k4":
             return ("NONE", "NONE")
-        b_inner = self.stage.bk_elems if self.c.as_contraction().b_trans else mn[1].tile
+        b_inner = self.block_width if self.c.as_contraction().b_trans else mn[1].tile
         # A TMA slab keeps the hardware spelling (the copy engine fixes its permutation, and the
         # descriptor splits its box down to the atom); every other transport writes the slab in
         # software, so its XOR reads the row index at the slab's OWN stride.
@@ -1759,7 +1782,7 @@ class _MmaOps(_AtomOps):
                 return "NONE"
             return pick_swizzle_atom(inner, nbytes)[1] if hardware else software_swizzle(inner, nbytes)
 
-        return tuple(mode(inner, e.nbytes) for e, inner in zip(self.slab_elems(), (self.stage.bk_elems, b_inner), strict=True))
+        return tuple(mode(inner, e.nbytes) for e, inner in zip(self.slab_elems(), (self.block_width, b_inner), strict=True))
 
     def state(self, cells):
         """The mma operand/accumulator register fragments — one ``_a``/``_b`` per register row/col and
@@ -1834,6 +1857,11 @@ class _MmaOps(_AtomOps):
         c = self.c
         atom, (m, n) = self.tile.atom, mn
         k_axis = self.k_axis
+        if self.block is None:
+            raise ValueError("gmem-direct MMA requires its Tile IR K block")
+        atom_k = self.block.factor("atom")
+        if atom_k != atom.atom_k:
+            raise ValueError(f"the bound ATOM K width is {atom_k}, expected {atom.atom_k} for {atom.name}")
         assert c.operands[0].as_slab() is not None, (
             "mma matmul arm: a register-resident (computed) A operand has no gmem-direct fragment loader here"
         )
@@ -1848,7 +1876,7 @@ class _MmaOps(_AtomOps):
         # (unknown at compile time) or a static K with a remainder. Both mask the same way: the
         # loaders zero-fill the fragment halves past ``k_zero``'s bound, so the summed reduction
         # keeps its identity. An exactly tiled static K carries no bound (byte-identical output).
-        k_exact = k_axis.extent.is_static and k_axis.extent.as_static() % atom.atom_k == 0
+        k_exact = k_axis.extent.is_static and k_axis.extent.as_static() % atom_k == 0
         k_zero = None if k_exact else (Var(k_axis.name), k_axis.extent_expr())
 
         def read_row(i):
@@ -1931,15 +1959,15 @@ class _MmaOps(_AtomOps):
             ]
 
         def wrap(body):
-            step = Literal(atom.atom_k, "int")
+            step = Literal(atom_k, "int")
             stmts, tail = list(body), []
             if _f16acc(atom):
                 # Promote every _F16ACC_STEPS atom-K steps (a compile-time-foldable modulo when
                 # the loop unrolls), plus the unconditional final fold after the loop — it also
                 # covers a symbolic / non-multiple K's partial last chunk.
                 promotes = _f16acc_promotes(m.reg, n.reg, 1, self.frag_ns)
-                period = atom.atom_k * _F16ACC_STEPS
-                fire = BinaryExpr("==", BinaryExpr("%", Var(k_axis.name), Literal(period, "int")), Literal(period - atom.atom_k, "int"))
+                period = atom_k * _F16ACC_STEPS
+                fire = BinaryExpr("==", BinaryExpr("%", Var(k_axis.name), Literal(period, "int")), Literal(period - atom_k, "int"))
                 stmts.append(Cond(cond=fire, body=tuple(promotes)))
                 tail = promotes
             return [
@@ -2011,7 +2039,7 @@ class _ScalarOps(_AtomOps):
         row by the slot, exactly as the mma drain does)."""
         a_op, b_op = operands
         offs = tuple(op.slot_row(slot) for op in operands)
-        return [_scalar_drain(self.c, cells, offset, (a_op.slab, b_op.slab), "_ki", self.stage.bk_elems, _tile_base(mn), offs)]
+        return [_scalar_drain(self.c, cells, offset, (a_op.slab, b_op.slab), "_ki", self.block_width, _tile_base(mn), offs)]
 
     def state(self, cells):
         """The scalar accumulator seeds. Gmem-direct (unstaged): none — the accumulators are seeded
@@ -2112,6 +2140,7 @@ def _atom_ops(
     frag_ns: str = "",
     slabs: tuple = (None, None),
     k_axis: Axis | None = None,
+    block: BoundBlockAxis | None = None,
     axes: tuple = (),
 ) -> _AtomOps:
     """The **one** atom dispatch — select the codegen strategy off the atom kind. ``c`` is the
@@ -2138,7 +2167,21 @@ def _atom_ops(
         # no semiring to re-thread and no former to go through.
         c = replace(c, operands=(make_cone([a_load], k_axis.name), *c.operands[1:]))
     cls = _MmaOps if isinstance(tile.atom, AtomKind) else _ScalarOps
-    return cls(c, tile, stage, inputs, workers, lead, Body(()) if epilogue is None else epilogue, seam, frag_ns, slabs, k_axis, axes)
+    return cls(
+        c=c,
+        tile=tile,
+        stage=stage,
+        inputs=inputs,
+        workers=workers,
+        lead=lead,
+        epilogue=Body(()) if epilogue is None else epilogue,
+        seam=seam,
+        frag_ns=frag_ns,
+        slabs=slabs,
+        k_axis=k_axis,
+        block=block,
+        axes=axes,
+    )
 
 
 def _row_value(value: Value, op: ElementwiseImpl, names: tuple[tuple[str, str], ...], group: int) -> tuple[list[Stmt], Value]:
@@ -2275,6 +2318,8 @@ def _fold_staged(
     producer_tile = sched.tile_of(source[producer_index]) if producer_index is not None else None
     producer_stage = sched.get("STAGE", source[producer_index]) if producer_index is not None else None
     producer_k = sched.axis_of(source[producer_index].axis) if producer_index is not None else None
+    producer_block = sched.block_of(source[producer_index]).reduce if producer_index is not None else None
+    producer_mn = sched.block_of(source[producer_index]).output if producer_index is not None else ()
 
     binder = {edge.axis: fold_k.name for edge in fold.operands if edge.axis is not None}
     zero = Sigma({fold.axis: Literal(0, "int")})
@@ -2289,7 +2334,12 @@ def _fold_staged(
         producer_tile = replace(producer_tile, axes=(producer_tile.axes[0], replace(producer_tile.axes[1], name=fold_k.name)))
     active_tile = producer_tile or tile
     lay = frag_layout(active_tile.atom.atom_m, active_tile.atom.atom_n)
-    bk = stage.bk_elems
+    block_axis = ops.block
+    if block_axis is None:
+        raise ValueError("a blocked carrier requires its Tile IR block")
+    bk = block_axis.width
+    if bk != stage.bk_elems:
+        raise ValueError(f"the bound carrier block is {bk} elements but STAGE resolved {stage.bk_elems}")
     cta = _cta(mn, tile.atom.lanes, tile.launch_threads)
     elem = ops.slab_elem()
     swizzles = ops.slab_swizzles(mn, elem.nbytes)
@@ -2341,6 +2391,7 @@ def _fold_staged(
     if m.mask:
         bounds += ((m.axis.name, m.ext, None),)
     if producer is not None:
+        assert producer_block is not None
         producer_slabs = (
             (invariant_op.slab, invariant_op.shape[1], invariant_op.swizzle) if invariant_op is not None else None,
             (stream_op.slab, stream_op.shape[1], stream_op.swizzle) if stream_op is not None else None,
@@ -2348,11 +2399,13 @@ def _fold_staged(
         _producer_ops, _producer_cells, producer_offset, _producer_mn, producer_body, producer_frags = _child_contraction_block(
             child=producer,
             tile=producer_tile,
+            mn=producer_mn,
             k0=k0,
             lead=ops.lead,
             ns=f"{ops.frag_ns}_fold",
             slabs=producer_slabs,
             child_k=producer_k,
+            block=producer_block,
             axes=sched.tile.axes,
         )
         producer_value = Value.frag(producer_frags)
@@ -2501,19 +2554,11 @@ def _fold_staged(
         merged, _, _ = evaluate(fold.combine, bindings, targets=carried)
         return [*block_ops.state(cells), *block_ops.staged_drain(operands, slot, cells, offset, mn), *merged]
 
-    extent = fold_k.extent.as_static() if fold_k.extent.is_static else fold_k.extent
-    n_chunks = (
-        extent // bk
-        if isinstance(extent, int)
-        else Dim(BinaryExpr("/", BinaryExpr("+", extent.expr, Literal(bk - 1, "int")), Literal(bk, "int")))
-    )
     pre, region = staged_kloop(
         transport=transport,
         drain=drain,
         depth=stage.depth,
-        bk_elems=bk,
-        n_chunks=n_chunks,
-        k_extent=extent,
+        block=block_axis,
         workers=ops.workers,
         block_threads=tile.launch_threads,
         lead=lead_segment,
@@ -2539,6 +2584,7 @@ def reduce_codegen(
     projection: tuple = (),
     carried: dict[str, Value] | None = None,
     k_axis: Axis | None = None,
+    block: BoundBlockAxis | None = None,
     axes: tuple = (),
 ):
     """The reusable, **sink-agnostic** ``(state_decls, reduce_region)`` from the atom strategy — the
@@ -2547,7 +2593,7 @@ def reduce_codegen(
     ``stage`` / ``inputs`` bind operand staging (both atoms stage the same smem slab off it, differing
     only in the drain leaf — ``ldmatrix`` vs plain ``Load``); ``workers`` splits the staged phases
     across producer / compute warp bands (the resolved :class:`WarpSpec`; ``None`` = uniform)."""
-    ops = _atom_ops(c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns, k_axis=k_axis, axes=axes)
+    ops = _atom_ops(c, tile, stage, inputs, workers, seam=seam, lead=lead, frag_ns=frag_ns, k_axis=k_axis, block=block, axes=axes)
     if fold is None:
         return ops.state, ops.reduce
     if value_child is None or sched is None:

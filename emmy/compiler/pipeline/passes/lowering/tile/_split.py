@@ -42,7 +42,7 @@ from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Body, Load, Write
 from emmy.compiler.ir.stmt.passes import projection_distributes
-from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
+from emmy.compiler.ir.tile import BlockAxis, OutputSpec, Placement, TileOp
 from emmy.compiler.ir.tile.ops import Sched, carries_partition, head, projection_regions, projection_root, projection_tail
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.fork import DeferredFork
@@ -57,14 +57,15 @@ _SPLIT = "_ksplit"  # the cross-CTA split grid axis
 # ---- what a kernel / an axis can carry -------------------------------------------------------- #
 
 
-def splitk_width(k_axis: Axis, width: int) -> str | None:
+def splitk_width(block: BlockAxis, width: int) -> str | None:
     """A cross-CTA split needs a STATIC reduce axis its width divides evenly — the σ-reindex
     reconstructs an absolute k from ``ksplit·(K/w) + kslice``, which is a bijection only when the
     extent is known and ``w`` divides it. Total over a symbolic axis rather than raising out of
     ``as_static``, so the catalog drops the width and a pin reports the reason."""
-    if not k_axis.extent.is_static:
-        return f"cross-CTA split of the symbolic reduce axis {k_axis.name!r} is not built"
-    big_k = k_axis.extent.as_static()
+    axis = block.axis
+    if not axis.extent.is_static:
+        return f"cross-CTA split of the symbolic reduce axis {axis.name!r} is not built"
+    big_k = axis.extent.as_static()
     if big_k % width == 0:
         return None
     return f"split-K width {width} does not divide K={big_k}; pick a dividing split width."
@@ -216,7 +217,8 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
         return None
     node = head(tile.op)
     assert node is not None and node.axis is not None
-    k_axis = tile.axis_of(node.axis)  # the node names its K; the kernel's axis table holds its extent
+    block = tile.blocks_of(node).reduce
+    assert block is not None
     key = Sched(tile).key("REDUCE", node) or "REDUCE"
     unsplit = DeferredFork(lambda: replace(unsplit_tile or tile, split_consumed=True), {key: ""})
     element = axis_of(key)
@@ -226,7 +228,7 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
         plan = Reduce.parse(pin, Work.parse(WORK.raw()))
         if not plan.needs_split:
             return [unsplit]
-        _enforce(splitk_width(k_axis, plan.cta))
+        _enforce(splitk_width(block, plan.cta))
         _enforce(_projection_refusal(tile, node))
         if plan.finalize == "atomic":
             _enforce(atomic_finalize(node, tail, tile.outputs))
@@ -238,7 +240,7 @@ def split_forks(match: Match, root: Node, *, unsplit_tile: TileOp | None = None)
     options: list[DeferredFork] = [unsplit]
     atomic_why = atomic_finalize(node, tail, tile.outputs)
     for plan in splitk_moves():
-        why = splitk_width(k_axis, plan.cta) or (atomic_why if plan.finalize == "atomic" else None)
+        why = splitk_width(block, plan.cta) or (atomic_why if plan.finalize == "atomic" else None)
         if why is not None:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("split g%d%s not offered: %s", plan.cta, plan.finalize[0], why)
@@ -255,34 +257,16 @@ def _split_fork(match: Match, root: Node, key: str, cta: int, finalize: str) -> 
 # ---- slicing the head fold -------------------------------------------------------------------- #
 
 
-def _slice_fold(fold: Fold, axis: Axis, b: int, split: Axis) -> tuple[Axis, Fold]:
+def _slice_fold(fold: Fold, axis: Axis, split: Axis, sigma: Sigma) -> Fold:
     """``(the sliced axis, the same monoid Fold over one CTA's absolute contiguous slice)`` — the
     generic (non-contraction) slicer: the whole fold rides ``Fold.rewrite`` under the σ-offset."""
-    offset = BinaryExpr("+", Var(axis.name), BinaryExpr("*", Var(_SPLIT), Literal(b, "int")))
-    sigma = Sigma({axis.name: offset})
-    sliced_axis = replace(axis, extent=Dim(b), window=Window(parent=axis.source_axis or axis, partition=True))
     # RE-DERIVED over a narrower axis, not renamed and not substituted-through: the fold keeps its
     # own binder (same name, sliced extent) while its operands' coordinates take the σ-offset. A
     # blanket σ would be refused as capture — this fold BINDS the name σ maps — and rightly so;
     # what changes here is the axis itself, which only the caller can say.
-    operands = tuple(sliced_edge(edge, sigma, axis.name, sliced_axis, split) for edge in fold.operands)
+    operands = tuple(sliced_edge(edge, sigma, fold.axis, axis, split) for edge in fold.operands)
     body = Body(tuple(stmt.substitute(sigma) for stmt in fold.lift.body))
-    return sliced_axis, replace(fold, operands=operands, lift=replace(fold.lift, body=body))
-
-
-def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
-    """Factor a STATIC contraction axis into ``ksplit × kslice``. ``ksplit`` (extent ``w``, name
-    ``_<k>_ks``) becomes the partial's lead grid axis, parallelized across CTAs and combined in
-    the finalize; ``kslice`` (extent ``K/w``, the ORIGINAL name) is the sliced contraction's. The
-    ``sigma`` maps the original ``k`` to ``ksplit·(K/w) + kslice`` so the operand loads
-    reconstruct the absolute index; distinct names are what avoid a double-reduce. The slice
-    carries its parentage: a cross-CTA split is CONSUMED by the rewrite that realizes it, and an
-    axis that is already a partition window is one nothing may partition again."""
-    b = k_axis.extent.as_static() // w
-    ksplit = Axis(name=f"_{k_axis.name}_ks", extent=Dim(w))
-    kslice = replace(k_axis, extent=Dim(b), window=Window(parent=k_axis.source_axis or k_axis, partition=True))
-    sigma = Sigma({k_axis.name: BinaryExpr("+", BinaryExpr("*", Var(ksplit.name), Literal(b, "int")), Var(k_axis.name))})
-    return ksplit, kslice, sigma
+    return replace(fold, operands=operands, lift=replace(fold.lift, body=body))
 
 
 def sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | None = None):
@@ -317,13 +301,13 @@ def sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | Non
 #: eight-wide atom), and a block no fragment grid covers is a block no tensor core can take.
 
 
-def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, Fold]:
+def _sliced_contraction(node: Fold, block: BlockAxis, w: int) -> tuple[Axis, Axis, Fold]:
     """``(ksplit, kslice, sliced)`` for a contraction head: the SAME bilinear node a non-split matmul
     builds, over ``kslice`` with operands σ-reindexed to absolute k, threading the node's OWN
     semiring (the reassociation ``fold_k = fold_{ksplit} ∘ fold_{kslice}`` is licensed by that
     ⊕-monoid's associativity). ``Fold.contraction`` regenerates the componentwise ⊕ over the same
     accumulator names, so the finalize folds the workspace states through the same monoid."""
-    ksplit, kslice, sigma = _factor_k(k_axis, w)
+    ksplit, kslice, sigma = block.partition(w, outer=f"_{block.axis.name}_ks")
     # Rebuilt DIRECTLY over the σ-reindexed operands, in stored order: the slice is the same term
     # with a narrower axis, so its lift, monoid and seeds are the node's own — there is nothing for
     # a former to re-derive, and no role to re-name.
@@ -501,13 +485,14 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     assert node is not None, "the split offer fires on node-form kernels only"
     root, region, body, stores, projection_pieces = _split_projection(tile, root, node)
     free = tuple(tile.place.free)
-    k_axis = tile.axis_of(node.axis)
+    block = tile.blocks_of(node).reduce
+    assert block is not None
     if node.as_contraction() is not None:
-        split, kslice, partial_fold = _sliced_contraction(node, k_axis, cta)
+        split, kslice, partial_fold = _sliced_contraction(node, block, cta)
     else:
-        _enforce(splitk_width(k_axis, cta))
-        split = Axis(name=_SPLIT, extent=Dim(cta))
-        kslice, partial_fold = _slice_fold(node, k_axis, k_axis.extent.as_static() // cta, split)
+        _enforce(splitk_width(block, cta))
+        split, kslice, sigma = block.partition(cta, outer=_SPLIT)
+        partial_fold = _slice_fold(node, kslice, split, sigma)
     axes = _with_axes(tile.axes, split, kslice)  # the pieces' axis table: the slice under its own name
     states = partial_fold.combine.results
     n_comp = len(states)

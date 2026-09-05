@@ -17,6 +17,7 @@ from frozendict import frozendict
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.structural import instance_memo
 from emmy.utils import cached_method
+from emmy.compiler.ir.tile.block import BlockClaim
 
 from .base import Schedule, ScheduleContext, ScheduleRefused
 from .choices import (
@@ -181,6 +182,7 @@ class _LocalSupport:
     edges: Mapping[EdgeSite, EdgeSchedule]
     work: Work | None = None
     axes: tuple[_AxisAgreement, ...] = ()
+    blocks: tuple[BlockClaim, ...] = ()
     fragments: tuple[_FragmentAgreement, ...] = ()
     raster_eligible: bool = False
     producer_eligible: bool = True
@@ -465,6 +467,15 @@ class ClassicMaterialization:
         for edge, resolved in self.stages.items():
             if edge not in schedule.edges or resolved.choice != schedule.edges[edge].stage:
                 raise ValueError(f"materialized stage at {edge_site_spelling(edge)} does not derive from its classic choice")
+        expected_blocks = {}
+        for site, choice in schedule.nodes.items():
+            geometry = self.tiles.get(site)
+            stages = {stage for edge, stage in self.stages.items() if edge[0] == site}
+            if len(stages) > 1:
+                raise ValueError(f"{node_id_spelling(site)} has more than one resolved block width")
+            for claim in source.blocks[site].claims(choice, geometry, next(iter(stages), None)):
+                if not claim.accepted or expected_blocks.setdefault(claim.parameter, claim.width) != claim.width:
+                    raise ValueError(f"schedule binds block parameter {claim.parameter!r} inconsistently")
         producer = workers.producer_warps if workers is not None else 0
         if schedule.kernel.work.producer != producer:
             raise ValueError(f"classic producer band {schedule.kernel.work.producer} disagrees with WarpSpec producer band {producer}")
@@ -487,6 +498,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
     _assignment: ClassicAssignment = field(default_factory=lambda: Schedule(None, {}, {}), repr=False)
     _work: Work | None = field(default=None, repr=False)
     _axes: Mapping[str, tuple[int, int]] = field(default_factory=frozendict, repr=False)
+    _blocks: Mapping[str, int] = field(default_factory=frozendict, repr=False)
     _fragments: Mapping[tuple[str, str], tuple] = field(default_factory=frozendict, repr=False)
     _raster_eligible: bool = field(default=False, repr=False)
     _producer_eligible: bool = field(default=True, repr=False)
@@ -525,6 +537,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         if not isinstance(self._assignment, Schedule):
             raise TypeError("classic context assignment must be a Schedule")
         object.__setattr__(self, "_axes", frozendict(self._axes))
+        object.__setattr__(self, "_blocks", frozendict(self._blocks))
         object.__setattr__(self, "_fragments", frozendict(self._fragments))
         if self._pins is not None:
             object.__setattr__(self, "_pins", frozendict({family: tuple(values) for family, values in self._pins.items()}))
@@ -825,6 +838,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             _assignment=Schedule(None, {}, {}),
             _work=None,
             _axes=frozendict(),
+            _blocks=frozendict(),
             _fragments=frozendict(),
             _raster_eligible=False,
             _producer_eligible=True,
@@ -873,12 +887,14 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         work = support.work or self._work
         nodes = {**self.assignment.nodes, site: support.node}
         axes = {**self._axes, **{claim.name: (claim.tile, claim.units) for claim in support.axes}}
+        blocks = {**self._blocks, **{claim.parameter: claim.width for claim in support.blocks}}
         fragments = {**self._fragments, **{(claim.role, claim.edge): claim.value for claim in support.fragments}}
         return self._advance(
             position=self.position + 1,
             _assignment=Schedule(None, nodes, {**self.assignment.edges, **support.edges}),
             _work=work,
             _axes=frozendict(axes),
+            _blocks=frozendict(blocks),
             _fragments=frozendict(fragments),
             _raster_eligible=self._raster_eligible or support.raster_eligible,
             _producer_eligible=self._producer_eligible and support.producer_eligible,
@@ -979,6 +995,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
                 if node.tile.is_tiled and isinstance(geometry, PlacedTile)
                 else ()
             ),
+            blocks=self.tile_op.blocks[site].claims(node, geometry, resolved_stage),
             fragments=(
                 _fragment_agreements(
                     site,
@@ -1031,6 +1048,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             node,
             edges,
             work=work,
+            blocks=self.tile_op.blocks[site].claims(node),
             raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
         )
 
@@ -1041,6 +1059,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             work=self._work,
             previous_nodes=tuple(self.assignment.nodes.values()) if self._work is None else (),
             axes=tuple(self._axes.items()),
+            blocks=tuple(self._blocks.items()),
             fragments=tuple(self._fragments.items()),
             allowed_works=self._allowed_works,
         )
@@ -1057,6 +1076,7 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         work: Work | None,
         previous_nodes: tuple[NodeSchedule, ...],
         axes: tuple[tuple[str, tuple[int, int]], ...],
+        blocks: tuple[tuple[str, int], ...],
         fragments: tuple[tuple[tuple[str, str], tuple], ...],
         allowed_works: frozenset[tuple[str, tuple[int, ...]]] | None,
     ) -> str | None:
@@ -1076,6 +1096,12 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             value = (claim.tile, claim.units)
             if axis_values.get(claim.name, value) != value:
                 return "pick disagrees on physical-axis geometry"
+        block_values = dict(blocks)
+        for claim in support.blocks:
+            if not claim.accepted:
+                return "pick does not consume the declared stream block"
+            if block_values.get(claim.parameter, claim.width) != claim.width:
+                return "pick disagrees on a symbolic block parameter"
         fragment_values = dict(fragments)
         for claim in support.fragments:
             key = (claim.role, claim.edge)

@@ -51,8 +51,8 @@ from dataclasses import dataclass
 from dataclasses import replace as dc_replace
 
 from emmy.compiler.ir.atom import SCALAR_ATOM, Atom, AtomKind, atom_for
-from emmy.compiler.ir.axis import Axis
-from emmy.compiler.ir.expr import Expr, Literal
+from emmy.compiler.ir.axis import Axis, Window
+from emmy.compiler.ir.expr import BinaryExpr, Expr, Literal, Var
 
 # ===========================================================================================
 # The one rule every codec below shares. Each value type parses and spells its own grammar by
@@ -505,10 +505,13 @@ class PlacedTile:
     def mn(self) -> tuple[Side, Side]:
         """The ``(m, n)`` output :class:`Side` pair — each placed axis with its derived geometry.
         Requires :meth:`at` to have bound the placement; :attr:`m` / :attr:`n` index it."""
-        dims = ((self.tile_m, self.units_m, self.reg_m), (self.tile_n, self.units_n, self.reg_n))
+        dims = (
+            (self.tile_m, self.units_m, self.reg_m, self.atom.atom_m),
+            (self.tile_n, self.units_n, self.reg_n, self.atom.atom_n),
+        )
         return tuple(
-            Side(axis=ax, tile=tile, units=units, reg=reg, block=ax.name + "_b", unit=ax.name + "_u")
-            for ax, (tile, units, reg) in zip(self.axes, dims, strict=True)
+            Side(axis=ax, tile=tile, units=units, reg=reg, atom=atom, block=ax.name + "_b", unit=ax.name + "_u")
+            for ax, (tile, units, reg, atom) in zip(self.axes, dims, strict=True)
         )
 
     @property
@@ -954,38 +957,17 @@ class Raster:
 _RASTER_RE = re.compile(r"g([mn])(\d+)")
 
 
-def _ext_expr(axis: Axis) -> Expr:
-    """The axis extent as an ``Expr`` — a literal int (static) or the symbolic ``Dim`` expr."""
-    return Literal(axis.extent.as_static(), "int") if axis.extent.is_static else axis.extent.expr
-
-
-def _overhangs(axis: Axis, tile: int) -> bool:
-    """True iff a ``tile``-wide CTA block overhangs ``axis`` (symbolic or non-divisible extent) —
-    so its tail must be masked."""
-    if tile <= 1:
-        return False
-    return not (axis.extent.is_static and axis.extent.as_static() % tile == 0)
-
-
 @dataclass(frozen=True)
 class Side:
-    """One tiled output axis of a contraction — the outer ``m`` or inner ``n`` — paired with its
-    derived per-CTA tile geometry. The two ride as a ``(m, n)`` pair (:attr:`Fold.mn`)
-    mirroring :class:`Tile`'s own ``units`` / ``regs`` tuples, so the factorizer
-    threads one object per axis instead of a dozen loose ``*_m`` / ``*_n`` args. The tile width,
-    unit / register counts, and bound block/unit var names are derived from an axis + a
-    :class:`Tile`; the ``mask`` / ``ext`` follow from the axis + width.
+    """One output axis after its symbolic GRID, UNIT, REGISTER and ATOM levels are bound."""
 
-    Lives here, beside ``Tile``, because it is SCHEDULE geometry, not algebra: ``ir/tile/ir.py``
-    already imports this module, so a tile-side home would make the schedule slice unable to derive
-    its own ``(m, n)`` reading."""
-
-    axis: Axis  # the output axis (a param)
-    tile: int  # the per-CTA width = units · reg · atom_dim
-    units: int  # parallel units on this axis (warps for mma / threads for scalar)
-    reg: int  # register sub-cells per unit on this axis
-    block: str  # the bound grid-block var (the axis name + ``_b``)
-    unit: str  # the bound unit var (the axis name + ``_u``)
+    axis: Axis
+    tile: int
+    units: int
+    reg: int
+    atom: int
+    block: str
+    unit: str
 
     @property
     def name(self) -> str:
@@ -993,13 +975,25 @@ class Side:
 
     @property
     def mask(self) -> bool:
-        """True iff a ``tile``-wide CTA block overhangs the axis (its tail must be masked)."""
-        return _overhangs(self.axis, self.tile)
+        return self.tile > 1 and not (self.axis.extent.is_static and self.axis.extent.as_static() % self.tile == 0)
 
     @property
     def ext(self) -> Expr:
-        """The axis extent as an ``Expr`` — a static literal or the symbolic ``Dim`` expr."""
-        return _ext_expr(self.axis)
+        return self.axis.extent_expr()
+
+    @property
+    def axes(self) -> tuple[Axis, Axis]:
+        parent = self.axis.source_axis or self.axis
+        return Axis(self.block, self.axis.extent.ceil_div(self.tile), window=Window(parent=parent)), Axis(self.unit, self.units)
+
+    def base(self, register: int) -> Expr:
+        block = BinaryExpr("*", Var(self.block), Literal(self.tile, "int"))
+        unit = BinaryExpr("*", Var(self.unit), Literal(self.reg * self.atom, "int"))
+        return BinaryExpr("+", BinaryExpr("+", block, unit), Literal(register * self.atom, "int"))
+
+    @property
+    def cta_base(self) -> Expr:
+        return BinaryExpr("*", Var(self.block), Literal(self.tile, "int"))
 
 
 __all__ = [

@@ -221,6 +221,7 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
     """A dumped tile-stage graph must rehydrate the scalar output-tile schedule."""
     import copy
     import json
+    from dataclasses import replace
 
     from emmy.compiler.ir.atom import ScalarAtom
     from emmy.compiler.ir.schedule import Raster, Schedule, Work
@@ -232,11 +233,12 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
         ProjectionSchedule,
     )
     from emmy.compiler.ir.stmt import Const
-    from emmy.compiler.ir.tile import TileOp
+    from emmy.compiler.ir.tile import TileOp, blockify
     from tests.compiler.terms import projection
 
     fold = projection(body=(Const(name="zero", value=0.0),))
     source = TileOp(op=fold)
+    source = replace(source, blocks=blockify(source))
     context = ClassicScheduleContext(source)
     classic = Schedule(
         KernelSchedule(Work(), Raster()),
@@ -246,7 +248,7 @@ def test_tile_op_scalar_atom_schedule_roundtrip(monkeypatch):
     g = Graph()
     x = g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (1,), "f16"), node_id="x")
     g.add_node(
-        op=TileOp(op=fold, schedule=classic, materialization=ClassicMaterialization({}, {})),
+        op=TileOp(op=fold, blocks=source.blocks, schedule=classic, materialization=ClassicMaterialization({}, {})),
         inputs=[x],
         output=Tensor("out", (1,), "f16"),
         node_id="out",

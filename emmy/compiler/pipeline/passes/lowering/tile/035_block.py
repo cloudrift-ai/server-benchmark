@@ -26,7 +26,7 @@ from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Fold, Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Assign, Body
-from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.tile import TileOp, blockify
 from emmy.compiler.pipeline import Match, Pattern, RuleSkipped
 from emmy.compiler.pipeline.passes.lowering.tile._split import sliced_edge
 
@@ -40,9 +40,14 @@ def rewrite(match: Match, root: Node, ctx=None) -> TileOp:
         raise RuleSkipped("TileOp already scheduled / nothing to block")
     blocked = block_tree(tile.op, tile.axes)
     if blocked is None:
-        raise RuleSkipped("no stream a block gives a contraction to")
+        blocks = blockify(tile)
+        if blocks == tile.blocks:
+            raise RuleSkipped("symbolic blocks already installed")
+        return replace(tile, blocks=blocks)
     op, axes = blocked
-    return replace(tile, op=op, axes=axes)
+    # Structural blocking creates new Fold sites; declare their symbolic blocks on the new tree.
+    result = replace(tile, op=op, axes=axes, blocks=())
+    return replace(result, blocks=blockify(result))
 
 
 MAX_BLOCK = 64

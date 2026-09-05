@@ -58,7 +58,7 @@ from emmy.compiler.ir.schedule import Raster
 from emmy.compiler.ir.schedule.views import cone_seam
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
-from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
+from emmy.compiler.ir.tile import BoundBlockAxis, FoldMove, Level, ReduceStage
 from emmy.compiler.ir.tile.ir import apply_output_specs, observed_result_names
 from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_form, chain_members, projection_regions, projection_root, sched_of
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
@@ -71,7 +71,7 @@ from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     store_sink,
 )
 from emmy.compiler.pipeline.passes.lowering.kernel._stage import sync_row_fill
-from emmy.compiler.pipeline.passes.lowering.kernel._tiling import atomize, grid_tile, register_tile, unit_tile
+from emmy.compiler.pipeline.passes.lowering.kernel._tiling import grid_tile
 
 # ---- the ambient cell environment and the wire a node produces ---------------------------------- #
 
@@ -267,8 +267,8 @@ def _refuse_partitioned_sweep(root, ctx: Ctx, axis: str) -> None:
     node = root
     while isinstance(node, Fold) and node.axis is None and node.operands:
         node = node.operands[0]
-    plan = ctx.sched.get("REDUCE", node) if isinstance(node, Fold) and node.axis is not None else None
-    if (plan is not None and (plan.coop > 1 or plan.reg > 1)) or (
+    block = ctx.sched.block_of(node).reduce if isinstance(node, Fold) and node.axis is not None else None
+    if (block is not None and (block.factor("block") > 1 or block.factor("register") > 1)) or (
         node.as_contraction() is not None and ctx.sched.tile_of(node) is not None
     ):
         raise UnbindableProjection(
@@ -387,6 +387,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         tile = ctx.sched.tile_of(op) if isinstance(op, Fold) and op.as_contraction() is not None else None
         stage = ctx.sched.get("STAGE", op) if tile is not None else None
     if tile is not None and tile.axes is not None and len(grid) >= 2:
+        site_blocks = ctx.sched.block_of(value_child or op)
+        mn = site_blocks.output
+        assert len(mn) == 2
         epi = list(tail)
         if not has_write(epi):
             epi = with_store(epi, ctx.output, grid, c.exposes[0])
@@ -406,6 +409,13 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
         # dropped the other — leaving an axis no block, unit or lead var defines.
         lead = tuple(axis for axis in grid if axis.name not in {bound.name for bound in tile.axes})
         carried = {}
+        if value_child is not None:
+            child_block = site_blocks.reduce
+            declared = ctx.sched.tile.blocks_of(op).reduce
+            assert child_block is not None and declared is not None
+            block = child_block.on(declared)
+        else:
+            block = site_blocks.reduce
         state_decls, reduce_region = reduce_codegen(
             c,
             tile,
@@ -418,6 +428,7 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             fold=op if value_child is not None else None,
             value_child=value_child,
             k_axis=k_axis,
+            block=block,
             axes=ctx.sched.tile.axes,
             sched=ctx.sched,
             projection=projection,
@@ -429,28 +440,37 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             sink = fold_store_sink(tile, tuple(epi), carried, frag_ns)
         else:
             sink = store_sink(c, tile, Body(tuple(epi)), lead, frag_ns, k_axis=k_axis, axes=ctx.sched.tile.axes)
-        t = unit_tile(register_tile(atomize(tile.atom.shape[:2]), tile.mn), tile.mn)
-        mn, bt, lanes = tile.mn, tile.launch_threads, tile.atom.lanes
+        bt, lanes = tile.launch_threads, tile.atom.lanes
     else:
         # The reduce partition rides the :class:`Fold` node; ``None`` for a pure pointwise /
         # scalar per-cell zero-axis ``Fold`` (no partition). Every partitioned reduction is a
         # ``Fold`` node (a projecting zero-axis
         # ``Fold`` was already peeled off by :func:`_factorize`).
-        plan = (ctx.sched.get("REDUCE", op) or Reduce()) if isinstance(op, Fold) else None
-        t, mn, lead, lanes = atomize((1, 1)), (None, None), grid, 1
+        block = ctx.sched.block_of(op).reduce if isinstance(op, Fold) else None
+        mn, lead, lanes, inner_axes = (None, None), grid, 1, ()
         # A CHAIN root's members carry their own partitions; every partitioned member and the root
         # stride around ONE lane axis, in body order (:func:`_tile_chain_members`).
         members = chain_members(op) if isinstance(op, Fold) and op.axis is not None else ()
-        parts = tuple(
-            (member, p)
-            for member in (*members, op)
-            if (p := ctx.sched.get("REDUCE", member)) is not None and (p.coop > 1 or p.reg > 1) and not p.coop_transposed
-        )
+        parts = []
+        for member in (*members, op):
+            if not isinstance(member, Fold) or member.axis is None:
+                continue
+            member_block = ctx.sched.block_of(member).reduce
+            if (
+                member_block is None
+                or (member_block.factor("block") <= 1 and member_block.factor("register") <= 1)
+                or member_block.transposed
+            ):
+                continue
+            parts.append((member, member_block))
+        parts = tuple(parts)
         if any(member is not op for member, _ in parts):
             state, fold, close, lane = _tile_chain_members(op, parts, ctx, tail, out_val)
-            t = replace(t, axes=(lane,)) if lane is not None else t
+            inner_axes = (lane,) if lane is not None else ()
             bt = lane.extent.as_static() if lane is not None else None
-        elif plan is None or (plan.coop <= 1 and plan.reg <= 1) or (plan.coop_transposed and chain_form(op)):
+        elif block is None or (
+            block.factor("block") <= 1 and block.factor("register") <= 1
+        ) or (block.transposed and chain_form(op)):
             # The TERM places its own stores (``Fold.lower``): a sweep store's loop opens around
             # exactly the terms evaluated over that sweep, so sibling sweeps stay siblings, and a
             # streamed store rides its observed fold's reduce loop — the one placement rule the
@@ -459,22 +479,20 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             placed = op.lower(frozenset(axis.name for axis in ctx.grid), output_specs, axes) if output_specs else op.lower(axes=axes)
             body = list(dict.fromkeys([*placed, *tail]))
             state, fold, close, bt = [], with_store(body, ctx.output, grid, out_val), [], None
-        elif plan.coop_transposed:
+        elif block.transposed:
             # The ``coop-t`` k-major matvec partition: the innermost output axis splits into a
             # shrunk ``<out>_blk`` grid axis (×32) + the 32-wide ``n_lane`` thread axis (with
             # ``k_co`` between them), so B loads coalesce across lanes. The emitted body's
             # output-var references were σ-substituted to ``blk·32 + n_lane`` inside (clamped,
             # and the store guarded, when 32 does not tile the swept extent).
-            state, fold, close, lanes_axes = _tile_reduce_axis_transposed(op, plan, ctx, tail, out_val)
-            out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
-            blk = Axis(name=f"{out_ax.name}_blk", extent=out_ax.extent.ceil_div(32), window=Window(parent=out_ax))
-            lead = tuple(blk if a.name == out_ax.name else a for a in grid)
-            t = replace(t, axes=lanes_axes)
-            bt = plan.coop
+            state, fold, close, lanes_axes, output_block = _tile_reduce_axis_transposed(op, block, ctx, tail, out_val)
+            lead = tuple(output_block if a.name == output_block.window.parent.name else a for a in grid)
+            inner_axes = lanes_axes
+            bt = block.factor("block")
         else:
-            state, fold, close, lane = _tile_reduce_axis(op, plan, ctx, tail, out_val)
-            t = replace(t, axes=(lane,)) if lane is not None else t
-            bt = plan.coop if lane is not None else None
+            state, fold, close, lane = _tile_reduce_axis(op, block, ctx, tail, out_val)
+            inner_axes = (lane,) if lane is not None else ()
+            bt = block.factor("block") if lane is not None else None
 
         def state_decls(_cells):
             return state
@@ -486,9 +504,9 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             return close
 
     return grid_tile(
-        t,
         mn=mn,
         lead_axes=lead,
+        inner_axes=() if tile is not None and tile.axes is not None and len(grid) >= 2 else inner_axes,
         block_threads=bt,
         lanes=lanes,
         state_decls=state_decls,
@@ -690,7 +708,7 @@ def emit_combine(
     return out
 
 
-def combine_tail(fold: Fold, *, reg: int, coop: int, lane) -> list[Stmt]:
+def combine_tail(fold: Fold, block: BoundBlockAxis, lane) -> list[Stmt]:
     """The algebra-driven **partial merge** that follows a partitioned reduce loop — the one place the
     two partial-fold geometries are assembled: the REG-tree fold of the ``reg`` ILP register copies
     into copy 0 (:func:`merge_stmts`), then — when threads cooperate (``lane`` is a lane :class:`Axis`,
@@ -701,6 +719,8 @@ def combine_tail(fold: Fold, *, reg: int, coop: int, lane) -> list[Stmt]:
     contraction's degenerate additive fold identically, so a cooperative reduce and a (future)
     cooperative-K contraction share this tail. ``merge_stmts`` keys a twisted combine's temps on
     the copy name, so each fold's internals are already unique."""
+    reg = block.factor("register")
+    coop = block.factor("block")
     merge: list[Stmt] = [st for r in range(1, reg) for st in merge_stmts(fold, tuple(f"{n}__r{r}" for n in fold.combine.results))]
     if lane is not None:
         merge += emit_combine(fold, t=lane.name, n_threads=coop)
@@ -708,8 +728,8 @@ def combine_tail(fold: Fold, *, reg: int, coop: int, lane) -> list[Stmt]:
 
 
 def _tile_reduce_axis_transposed(
-    op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str
-) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...]]:
+    op: Fold, block: BoundBlockAxis, ctx: Ctx, tail: tuple, out_val: str
+) -> tuple[list[Stmt], list[Stmt], list[Stmt], tuple[Axis, ...], Axis]:
     """The ``coop-t`` (transposed) cooperative reduce — the k-major-B matvec partition: 32
     ``n_lane`` threads (innermost) sweep the OUTPUT axis so B loads coalesce across lanes at
     every k step, and ``coop/32`` ``k_co`` slices ride the upper thread bits. The emitted body
@@ -721,31 +741,24 @@ def _tile_reduce_axis_transposed(
     own cell. Unsupported here (the enumeration must not offer ``t`` on them): shared-row
     ``smem`` shared-row staging, distributed full-row projections (a ``Loop`` in the tail)."""
     grid = ctx.grid
-    coop, reg = plan.coop, plan.reg
-    lanes_n = 32
-    k_ways = coop // lanes_n
-    assert coop % lanes_n == 0 and k_ways >= 1, f"b{coop}t needs a multiple of {lanes_n}"
     stage = ctx.sched.get("STAGE", op)
     assert not (stage is not None and stage.smem), "transposed coop cannot ride shared-row staging"
     out_ax = next(a for a in reversed(grid) if not (a.extent.is_static and a.extent.as_static() == 1))
 
     *hoisted, rloop = op.lower(axes=ctx.sched.tile.axes)
     view = op.as_reduction()
-    axis = rloop.axis
-    stride = k_ways * reg
-    masked = reg > 1 and not (axis.extent.is_static and axis.extent.as_static() % stride == 0)
-
-    n_lane = Axis(name=f"{out_ax.name}_ln", extent=lanes_n)
-    k_co = Axis(name=f"{axis.name}_co", extent=k_ways) if k_ways > 1 else None
-    start = Var(k_co.name) if k_co is not None else Literal(0, "int")
-    blk_name = f"{out_ax.name}_blk"
+    bound = block.transposed_loop(rloop.axis, out_ax)
+    loop = bound.loop
+    axis, n_lane, k_co = loop.axis, bound.output_lane, loop.lane
+    reg = loop.registers
+    blk_name = bound.output_block.name
     # The swept cell this lane owns. The grid is ``ceil(E / 32)`` blocks, so a swept axis 32 does
     # not tile leaves the last block's upper lanes OVERHANGING: they clamp-read the last valid
     # column (a duplicate sweep, in-bounds) and their store is discarded by the guard below — the
     # same masked-overhang contract the tiled contraction's ``clamp_last`` / ``Cond`` pair states.
-    cell = BinaryExpr("+", BinaryExpr("*", Var(blk_name), Literal(lanes_n, "int")), Var(n_lane.name))
+    cell = bound.cell
     out_ext = out_ax.extent_expr()
-    overhang = not (out_ax.extent.is_static and out_ax.extent.as_static() % lanes_n == 0)
+    overhang = bound.overhang
     subst = Sigma({out_ax.name: clamp_last(cell, out_ext) if overhang else cell})  # the sweep's reads
     store_subst = Sigma({out_ax.name: cell})  # the guarded projection: in range by the guard, so no clamp
 
@@ -763,13 +776,13 @@ def _tile_reduce_axis_transposed(
     stream_identity = (str(view.terms[0]), ElementwiseImpl("maximum").identity) if view.twisted else None
     copies: list[Stmt] = []
     for r in range(reg):
-        copies.extend(_replicate(rloop.body, r, k_ways, axis, masked, protected, stream_identity))
-    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
+        copies.extend(_replicate(rloop.body, r, loop.register_span, axis, loop.masked, protected, stream_identity))
+    strided = StridedLoop(axis=axis, start=loop.start, step=Literal(loop.stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
     strided = strided.substitute(subst)
 
     merge: list[Stmt] = [st for r in range(1, reg) for st in merge_stmts(op, tuple(f"{n}__r{r}" for n in view.states))]
     if k_co is not None:
-        merge += emit_combine(op, t=k_co.name, n_threads=k_ways, inner=(n_lane.name, lanes_n))
+        merge += emit_combine(op, t=k_co.name, n_threads=k_co.extent.as_static(), inner=(n_lane.name, n_lane.extent.as_static()))
 
     tail_stmts = with_store(list(tail), ctx.output, grid, out_val)
     tail_stmts = [s.substitute(store_subst) for s in tail_stmts]
@@ -779,24 +792,18 @@ def _tile_reduce_axis_transposed(
         tail_stmts = [Cond(cond=BinaryExpr("==", Var(k_co.name), Literal(0, "int")), body=tuple(tail_stmts))]
 
     lanes_axes = ((k_co,) if k_co is not None else ()) + (n_lane,)
-    return [], [*(s.substitute(subst) for s in hoisted), strided, *merge], tail_stmts, lanes_axes
+    return [], [*(s.substitute(subst) for s in hoisted), strided, *merge], tail_stmts, lanes_axes, bound.output_block
 
 
-def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[Stmt]:
+def _strided_fold(op: Fold, rloop, block: BoundBlockAxis, ctx: Ctx, lane: Axis | None) -> list[Stmt]:
     """The partitioned reduce loop for ONE fold — ``reg`` ILP chains striding ``coop·reg`` from the
     lane's start, then the REG-tree merge and (when threads cooperate) the cross-thread combine.
     ``rloop`` is the fold's already-emitted serial reduce ``Loop``; the caller owns any prologue
     ``lower`` hoisted ahead of it and any smem row-staging rewrite."""
-    coop, reg = plan.coop, plan.reg
+    bound = block.loop(rloop.axis, lane)
+    reg = bound.registers
     view = op.as_reduction()
-    axis = rloop.axis
-    # A STRIDED axis walks its extent one BLOCK at a time, so the partition is over its trips, not
-    # over its coordinates: every span below is an iteration count times the axis's own step.
-    step = axis.step.value if isinstance(axis.step, Literal) else 1
-    trips = axis.trips
-    stride = coop * reg * step
-    masked = reg > 1 and not (trips is not None and trips % (coop * reg) == 0)
-    start = Literal(0, "int") if lane is None else BinaryExpr("*", Var(lane.name), Literal(step, "int")) if step > 1 else Var(lane.name)
+    axis = bound.axis
 
     # The reduce loop: ``reg`` interleaved accumulator chains (ILP), striding the axis by
     # ``coop·reg`` from the lane's start. The dissolved fold ``Accum``\\ s seed each copy's
@@ -831,14 +838,14 @@ def _strided_fold(op: Fold, rloop, plan, ctx: Ctx, lane: Axis | None) -> list[St
     stream_identity = (str(view.terms[0]), ElementwiseImpl("maximum").identity) if view.twisted else None
     copies: list[Stmt] = []
     for r in range(reg):
-        copies.extend(_replicate(rloop.body, r, coop * step, axis, masked, protected, stream_identity))
-    strided = StridedLoop(axis=axis, start=start, step=Literal(stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
+        copies.extend(_replicate(rloop.body, r, bound.register_span, axis, bound.masked, protected, stream_identity))
+    strided = StridedLoop(axis=axis, start=bound.start, step=Literal(bound.stride, "int"), body=Body(tuple(copies)), unroll=rloop.unroll)
 
     # The carrier-driven partial merge: the REG-tree fold of the ``reg`` ILP copies into the survivor
     # (copy 0's names) + (when threads cooperate) the cross-thread combine, reassigning the carried
     # state in place. The one shared tail a cooperative reduce and a future cooperative-K contraction
     # both emit (``combine_tail``).
-    return [strided, *combine_tail(op, reg=reg, coop=coop, lane=lane)]
+    return [strided, *combine_tail(op, block, lane)]
 
 
 def _tile_chain_members(
@@ -853,11 +860,13 @@ def _tile_chain_members(
     axis on every lane from zero. All cooperating members share ONE lane axis — the walk's
     one-inventory rule already forced their ``coop`` to agree — and the trailing projection
     closes lane-distributed."""
-    plans = {id(member): plan for member, plan in parts}
-    coop = max(plan.coop for _, plan in parts)
-    assert len({plan.coop for _, plan in parts if plan.coop > 1}) <= 1, "cooperating chain members must share one coop width"
-    head = next(member for member, plan in parts if plan.coop == coop)
-    lane = Axis(name=f"{head.axis}_co", extent=coop) if coop > 1 else None
+    blocks = {id(member): block for member, block in parts}
+    coop = max(block.factor("block") for _, block in parts)
+    assert len({block.factor("block") for _, block in parts if block.factor("block") > 1}) <= 1, (
+        "cooperating chain members must share one coop width"
+    )
+    head_block = next(block for _, block in parts if block.factor("block") == coop)
+    lane = head_block.lane
     fold: list[Stmt] = []
     for stmt in op.lower(axes=ctx.sched.tile.axes):
         member = None
@@ -867,8 +876,8 @@ def _tile_chain_members(
         if member is None:
             fold.append(stmt)
             continue
-        plan = plans[id(member)]
-        fold.extend(_strided_fold(member, stmt, plan, ctx, lane if plan.coop > 1 else None))
+        block = blocks[id(member)]
+        fold.extend(_strided_fold(member, stmt, block, ctx, lane if block.factor("block") > 1 else None))
     return [], fold, _lane_close(list(tail), lane, coop, ctx, out_val), lane
 
 
@@ -897,7 +906,9 @@ def _lane_close(tail: list[Stmt], lane: Axis | None, coop: int, ctx: Ctx, out_va
     return body_tail
 
 
-def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
+def _tile_reduce_axis(
+    op: Fold, block: BoundBlockAxis, ctx: Ctx, tail: tuple, out_val: str
+) -> tuple[list[Stmt], list[Stmt], list[Stmt], Axis | None]:
     """Tile the REDUCE axis per the node's cooperating :class:`Reduce` — the reduce counterpart
     of the output ``unit_tile`` / ``register_tile`` levels: ``coop`` lanes across threads (the
     ``_co`` lane axis, the axis's UNIT level) and ``reg`` ILP chains across per-thread accumulators
@@ -908,7 +919,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
     cross-thread combine), the distributed projection close, and the lane :class:`Axis` (``None``
     for standalone ILP — one thread per cell, lane fixed at 0)."""
     grid = ctx.grid
-    coop = plan.coop
+    coop = block.factor("block")
 
     # The per-cell reduce loop is the node's own lowering (``Fold.lower``) off the :class:`Fold`
     # **node** — the walk reaches any nested contraction as a node. The algebra
@@ -922,7 +933,7 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
 
     # The cooperative lane axis (Tile-decoded, innermost) — present only when threads
     # cooperate; standalone ILP (coop == 1) runs one thread per cell, lane fixed at 0.
-    lane = Axis(name=f"{axis.name}_co", extent=coop) if coop > 1 else None
+    lane = block.lane
     start = Var(lane.name) if lane is not None else Literal(0, "int")
 
     # Shared-row staging (the fused norm→linear prologue): an input row folded by the cooperative
@@ -951,5 +962,5 @@ def _tile_reduce_axis(op: Fold, plan, ctx: Ctx, tail: tuple, out_val: str) -> tu
         rloop = replace(rloop, body=Body(tuple(_restage_loads(list(rloop.body), staged, smem_name, n_grid, grid_vars))))
         tail_src = _restage_loads(tail_src, staged, smem_name, n_grid, grid_vars)
 
-    fold = _strided_fold(op, rloop, plan, ctx, lane)
+    fold = _strided_fold(op, rloop, block, ctx, lane)
     return fill_stmts, [*hoisted, *fold], _lane_close(tail_src, lane, coop, ctx, out_val), lane

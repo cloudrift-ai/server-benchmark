@@ -17,6 +17,7 @@ from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.frontend.ir import MatmulOp
 from emmy.compiler.ir.loop import LoopOp
+from emmy.compiler.ir.tile import blockify
 from emmy.compiler.pipeline import LOOP_PASSES, Pipeline
 from emmy.compiler.pipeline.fork import iter_leaves
 
@@ -38,7 +39,19 @@ def _unmapped_tile(m: int, n: int, k: int = 64, dtype: str = "f16"):
     g.inputs, g.outputs = ["a", "b"], ["o"]
     node = Pipeline.build(LOOP_PASSES).run(g).nodes["o"]
     tile = lift_loop_op(node.op, name=node.op.name)
+    tile = replace(tile, blocks=blockify(tile))
     return replace(tile, knobs=dict(node.op.knobs), inputs=dict(node.op.inputs), outputs=dict(node.op.outputs))
+
+
+def test_matmul_blockification_does_not_add_a_schedule_family() -> None:
+    """The existing choices bind the symbolic domains; the row codec stays byte-for-byte the same."""
+    from emmy.compiler.ir.schedule.classic import ClassicScheduleCodec, ClassicScheduleContext
+    from emmy.compiler.ir.schedule.classic_projection import project_classic
+
+    tile = _unmapped_tile(128, 128)
+    ctx = Context.from_target((12, 0))
+    codec = ClassicScheduleCodec(ClassicScheduleContext(tile, ctx, project_classic(tile, ctx)))
+    assert codec.keys() == ("WORK", "RASTER", "TILE", "REDUCE", "STAGE")
 
 
 def test_a_precision_gate_pin_stamps_a_different_space() -> None:
@@ -99,6 +112,7 @@ def test_split_dim_store_does_not_share_an_identity() -> None:
         out = Pipeline.build(LOOP_PASSES).run(graph)
         node = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)][-1]
         tile = lift_loop_op(node.op, name=node.op.name)
+        tile = replace(tile, blocks=blockify(tile))
         return replace(tile, knobs=dict(node.op.knobs), inputs=dict(node.op.inputs), outputs=dict(node.op.outputs))
 
     flat, split = lifted(matmul), lifted(f"{matmul}.reshape(4,32,128)")
@@ -134,6 +148,7 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
     out = Pipeline.build(LOOP_PASSES).run(graph_from_code(code)[0])
     node = [n for n in out.nodes.values() if isinstance(n.op, LoopOp)][-1]
     tile = lift_loop_op(node.op, name=node.op.name)
+    tile = replace(tile, blocks=blockify(tile))
     tile = replace(tile, knobs=dict(node.op.knobs), inputs=dict(node.op.inputs), outputs=dict(node.op.outputs))
 
     ctx = Context.from_target((12, 0))
@@ -147,6 +162,7 @@ def test_an_axis_renamed_twin_preserves_the_node_id_vocabulary() -> None:
 
     twin_op = rewrite(tile.op, lambda n: n, Sigma({old: Var(new)}), ren)
     twin = TileOp(op=twin_op, place=tile.place, output_specs=tile.output_specs, axes=tuple(ren(axis) for axis in tile.axes))
+    twin = replace(twin, blocks=blockify(twin))
     twin = replace(twin, knobs=dict(tile.knobs), inputs=dict(tile.inputs), outputs=dict(tile.outputs))
     twin_row = dict(next(iter_leaves(classic_forks(twin, "t", twin.knobs, ctx))).knobs)
     assert spelled in twin_row

@@ -1690,7 +1690,7 @@ configs:
       REDUCE: ''
       STAGE: d1/smem-async
       RASTER: ''
-    identity: 69d8ef6a1687d7f1e24c5e1bcce8bd39df43f22fc9e8d27d0c06b00aba23011c
+    identity: 024b8e556473076a79acbdef278e11d50fd8aeacc26cf8f7eca801dd7f254fde
 loops:
 - inputs: [x]
   outputs: [x_static_fp4_scale_bits, x_static_fp4_bits]

@@ -107,6 +107,18 @@ construction and a reconstruction therefore expose the same closed operand edges
 The invariant also applies when a schedule row constructs or reloads an already-mapped Tile: promotion extends the
 grid in lockstep with the free axes, so per-cell replication never mistakes the swept coordinate for an SSA name.
 
+**One enumeration.** A kernel's grid enumerates its output cells ONCE. Sibling promoted sweeps of different widths
+therefore ride ONE axis — the widest — decided at formation (`_fromloop._shared_output_axis`), with post-init's
+promotion consuming that decision. A narrower region rides the shared axis's first cells: its reads clamp
+(`host % extent`, so a cell past its own extent recomputes a valid row instead of reading past its operand) and its
+stores carry that extent as the `OutputSpec.guard` both reconstitution spellings honour (`OutputSpec.guarded`, applied
+by `Fold.lower` and `apply_output_specs` alike). One free axis per sweep would instead make the grid the CARTESIAN
+PRODUCT of the kernel's output widths, and every region would be enumerated once per cell of every other — a correct
+kernel (the stores are idempotent) doing the work of the product instead of the sum: the fused q/k/v projection
+recomputing and rewriting q once per column of the k/v axis, the NVFP4 post-attention re-encode asking for a
+2^31-point launch off outputs 2048, 256 and 4096 wide. The decision belongs to formation because it rewrites the term,
+and by post-init the tile is already a graph node whose construction exceptions read as fusion refusals.
+
 **Storage-decode factors hoist to the epilogue.** A product argument whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
 axis is not left as a computed cone. Formation splits it: the decode is absorbed by the raw slab's storage
@@ -149,7 +161,8 @@ the sweep store follows the term defining its value inside that loop. A non-cont
 projection: its slabs read the sweep axis, so the placement rule puts its loop inside the sweep loop, while a
 sibling evaluated over the grid axes alone stays ahead of it. Two sibling sweeps are two coordinates: a loop that
 reuses an enclosing or sibling sweep's name (the fused quantize kernel's byte sweep and scale sweep, both `a1`) is
-alpha-renamed at the lift, binder and references together, since a term tree names one coordinate per name. The
+alpha-renamed at the lift, binder and references together, since a term tree names one coordinate per name — and if
+both then promote, the shared-axis rule above merges them back onto one coordinate with a guard. The
 kernel binder's serial arm hands the stores to the term the same way, so the emitted kernel places them exactly as
 the identity's `loop_body` does; only a projection stream spelled without the term (the peeled root's tail, a cut
 piece) still wraps the trailing run reading the axis into one loop. A contraction is exempt because post-init

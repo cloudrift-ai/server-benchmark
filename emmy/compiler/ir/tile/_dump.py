@@ -231,7 +231,10 @@ def tile_body(tile) -> str:
     lines = [f"    {line}" for line in _pretty_place(tile)]
     lines += pretty(tile.op, "    ", tile=tile)
     outputs = [
-        f"{f'sweep({spec.sweep.name}) ' if spec.sweep else ''}{line.strip()}" for spec in tile.output_specs for line in spec.write.pretty()
+        f"{f'sweep({spec.sweep.name}) ' if spec.sweep else ''}{line.strip()}"
+        f"{f'  if {spec.guard[0]} < {spec.guard[1]}' if spec.guard else ''}"
+        for spec in tile.output_specs
+        for line in spec.write.pretty()
     ]
     lines += _pretty_region("outputs", outputs)
     return "\n".join(lines)

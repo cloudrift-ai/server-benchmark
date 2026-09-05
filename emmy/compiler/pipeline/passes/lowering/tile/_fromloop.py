@@ -12,13 +12,15 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 
-from emmy.compiler.ir.expr import Var
+from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.loop import LoopOp
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Init, Load, Loop, Select, Stmt, Write
+from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import Placement, TileOp, extract_output_specs
+from emmy.compiler.ir.tile.path import sites
 
 
 def _stamp_axes(loop: Loop) -> Loop:
@@ -346,6 +348,62 @@ def _renamed_sweep(loop: Loop, taken: set[str]) -> Loop:
     return replace(loop, axis=replace(loop.axis, name=fresh), body=Body(tuple(stmt.substitute(coords) for stmt in loop.body)))
 
 
+def _shared_output_axis(term: Fold, specs: tuple) -> tuple[Fold, tuple, frozenset[str]]:
+    """Map the sibling output sweeps a contraction is evaluated over onto ONE axis — the widest —
+    and return ``(term, specs, the axis names retired)``.
+
+    ``TileOp.__post_init__`` promotes such a sweep onto the placement's free axes, so the grid
+    parallelises the contraction under it; that promotion consumes the decision made here. One free
+    axis PER SWEEP would make the grid the cartesian product of the kernel's output widths, and a
+    kernel whose grid is a product enumerates every region once per cell of every other — the fused
+    q/k/v projection recomputing and rewriting q once per column of the k/v axis, the NVFP4
+    post-attention re-encode asking for a 2^31-point launch off outputs 2048, 256 and 4096 wide.
+    One shared axis is one enumeration, and the contraction under each region still finds an
+    ``(m, n)`` pair on the grid, so the tensor-core tier survives.
+
+    A narrower region rides the shared axis's first cells: its reads CLAMP (σ maps its coordinate to
+    ``host % extent``, so an overhanging cell recomputes a valid row instead of reading past its
+    operand) and its stores carry that extent as an ``OutputSpec.guard``. Sweeps of equal extent
+    need neither — they are the same cell — so they merge by rename alone. The decision is made
+    here, at formation, because ``TileOp.__post_init__`` cannot rewrite the term: the tile is
+    already a node of the graph by then, and the exception a rewrite raises there is read as a
+    fusion refusal, which unfuses the very kernel this keeps whole.
+    """
+    contractions = tuple(site.node for site in sites(term) if site.node.as_contraction() is not None)
+    promoted = {
+        spec.sweep.name: spec.sweep
+        for spec in specs
+        if spec.sweep is not None and any(spec.sweep.name in edge.free_axes for con in contractions for edge in con.operands)
+    }
+    if len(promoted) < 2 or not all(axis.extent.is_static for axis in promoted.values()):
+        return term, specs, frozenset()
+    host = max(promoted.values(), key=lambda axis: axis.extent.as_static())
+    width = host.extent.as_static()
+    narrow = {name: axis.extent.as_static() for name, axis in promoted.items() if name != host.name}
+    coords = Sigma(
+        {
+            name: Var(host.name) if extent == width else BinaryExpr("%", Var(host.name), Literal(extent, "int"))
+            for name, extent in narrow.items()
+        }
+    )
+    term = rewrite(term, lambda name: name, coords)
+    onto = dict.fromkeys(narrow, host.name)
+    specs = tuple(
+        replace(
+            spec,
+            # Under the guard the shared coordinate IS the region's own, so the store index takes it
+            # unclamped — a dense output column the store geometry can still read as one.
+            write=spec.write.rename(onto),
+            sweep=host,
+            guard=None if narrow[spec.sweep.name] == width else (host.name, narrow[spec.sweep.name]),
+        )
+        if spec.sweep is not None and spec.sweep.name in narrow
+        else spec
+        for spec in specs
+    )
+    return term, specs, frozenset(narrow)
+
+
 def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     """Lift one statement tree into ``(operand terms, statements)`` — SEPARATED, bottom up.
 
@@ -560,12 +618,18 @@ def lift_loop_op(op: LoopOp, *, name: str = "") -> TileOp:
     # projection normalization dissolves, rather than a permanent layer over every bare kernel.
     results = _root_results(Body(body)) or tuple(dict.fromkeys(value for spec in output_specs for value in spec.write.values))
     edges, lift = _close((), edges, Body(body), results, tuple(free), ())
+    # Sibling output regions of different widths ride ONE grid axis, so the kernel enumerates its
+    # output cells once (:func:`_shared_output_axis`) — decided here, on the term, before the tile
+    # that promotes it exists.
+    term, output_specs, retired = _shared_output_axis(Fold(operands=edges, lift=lift), output_specs)
     # The kernel's axis table: the free axes and every loop the nest bound (reduce, sweep), by
     # name — the term names them, the kernel holds their extents.
     axes = {axis.name: axis for axis in (*free, *(loop.axis for loop in Body.coerce(cell).loops))}
     axes.update((spec.sweep.name, spec.sweep) for spec in output_specs if spec.sweep is not None)  # a renamed sibling sweep
+    for name_ in retired - {spec.sweep.name for spec in output_specs if spec.sweep is not None}:
+        axes.pop(name_, None)  # a sweep merged onto the shared axis is no coordinate of this kernel
     return TileOp(
-        op=Fold(operands=edges, lift=lift),
+        op=term,
         name=name,
         place=Placement(free=tuple(free)),
         axes=tuple(axes.values()),

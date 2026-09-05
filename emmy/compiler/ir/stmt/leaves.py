@@ -1059,3 +1059,20 @@ class OutputSpec:
 
     write: Write
     sweep: Axis | None = None
+    #: This region's OWN extent on a SHARED output axis — ``(axis name, exclusive bound)`` — or
+    #: ``None`` for a region spanning the axis. Sibling output regions of different widths ride one
+    #: axis, the widest, so the kernel's grid enumerates its output cells ONCE instead of their
+    #: cartesian product. The narrower region's cells past its own extent still compute (its reads
+    #: clamp, ``host % extent``); this bound is what keeps them from storing.
+    guard: tuple[str, int] | None = None
+
+    def guarded(self, stmts) -> tuple[Stmt, ...]:
+        """``stmts`` under this region's bound — the ONE spelling of a shared axis's store
+        predicate, so the term's own placement (``Fold.lower``) and the term-free stream
+        (``apply_output_specs``) reconstitute the same effect. Unbounded: ``stmts`` verbatim."""
+        if self.guard is None:
+            return tuple(stmts)
+        from emmy.compiler.ir.stmt.blocks import Cond  # noqa: PLC0415 — blocks imports this module
+
+        name, bound = self.guard
+        return (Cond(cond=BinaryExpr("<", Var(name), Literal(bound, "int")), body=tuple(stmts)),)

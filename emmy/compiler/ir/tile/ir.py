@@ -111,7 +111,11 @@ def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> Bo
     output ``Loop``, and a store over OBSERVED values streams into its reduce loop when that loop
     is present. The ONE reconstitution rule the scheduler's tail gates, the materializer's
     zero-axis ``Fold`` peel and ``030_cut`` share, so the lowered kernels stay byte-identical to
-    the stored-``Write`` era. A TERM places its stores itself (:meth:`Fold.lower`)."""
+    the stored-``Write`` era. A TERM places its stores itself (:meth:`Fold.lower`).
+
+    A spec bounded on a shared output axis (``OutputSpec.guard``) contributes its store — and, on
+    a sweep, the trailing run the sweep wraps — under that bound, so the cells past the region's
+    own extent compute and do not store."""
     out = list(stmts)
     stores = list(specs)
     index = 0
@@ -121,14 +125,15 @@ def apply_output_specs(stmts, specs, *, observed: frozenset = frozenset()) -> Bo
             # At term level — the fold not yet a ``Loop`` — an observed store keeps its post-node
             # position, which is also where extraction's round-trip gate expects it.
             if not (observed and set(st.write.values) <= observed and _splice_streamed(out, st.write)):
-                out.append(st.write)
+                out.extend(st.guarded((st.write,)))
             index += 1
             continue
         end = index + 1
-        while end < len(stores) and stores[end].sweep == st.sweep:
+        while end < len(stores) and stores[end].sweep == st.sweep and stores[end].guard == st.guard:
             end += 1
         start = _sweep_start(out, st.sweep.name)
-        out = [*out[:start], Loop(axis=st.sweep, body=Body((*out[start:], *(store.write for store in stores[index:end]))))]
+        run = (*out[start:], *(store.write for store in stores[index:end]))
+        out = [*out[:start], Loop(axis=st.sweep, body=Body(st.guarded(run)))]
         index = end
     return Body(tuple(out))
 
@@ -308,6 +313,11 @@ class TileOp(Op):
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
 
+        # An output sweep a contraction is evaluated over moves onto the placement's free axes, so
+        # the grid parallelises that contraction. WHICH axes those are was settled at formation
+        # (``_fromloop._shared_output_axis``): sibling regions of different widths already share one
+        # axis, the widest, so this promotes one axis per shared output extent and the grid
+        # enumerates the kernel's output cells once rather than their cartesian product.
         contractions = tuple(site.node for site in sites(normalized) if site.node.as_contraction() is not None)
         promoted = {
             store.sweep.name

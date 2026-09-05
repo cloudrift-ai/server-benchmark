@@ -499,6 +499,13 @@ may spell the same as the enclosing contraction's): `fold.subst_free(stmt, sigma
 a `Loop` / reducing `Fold` binder that re-binds a substituted name, and is what the smem compute fill substitutes
 cell coordinates through.
 
+σ over a term also moves the term's own BINDERS. A lambda is closed, so its params past the operand correspondence are
+exactly the coordinates its body reads; a σ answering with an expression rather than a variable (the shared output
+axis's `a1_1 → a1 % 32` clamp) retires the substituted param and introduces the expression's own coordinates instead.
+The `Fold` rewrite handler therefore re-CLOSES through `Lambda.closing`: it keeps the iteration var and the
+operand-bound prefix where every positional reading expects them, and appends what the rewritten body still reads as
+trailing params. With no substituted coordinate the residual is empty and the rebuild is the plain rename it was.
+
 ### `ir/stmt/normalize.py` — structural canonicalization
 
 Pure `body → body` passes run from `LoopOp.__post_init__` so every

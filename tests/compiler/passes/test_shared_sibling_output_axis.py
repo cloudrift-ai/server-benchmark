@@ -11,16 +11,15 @@ instead of their sum: the fused q/k/v projection below recomputed and rewrote q 
 the k/v axis — a 32x multiplier on a serving kernel — and the NVFP4 post-attention re-encode, whose
 three outputs are 2048, 256 and 4096 wide, asked for a 2^31-point launch.
 
-The placement instead maps every promoted sibling onto ONE axis, the widest, and guards each
-narrower region's store to its own extent. One enumeration, the tensor-core tier preserved (the
-tiled root still finds an ``(m, n)`` pair on the grid), and the redundant recompute gone.
+Formation instead maps every promoted sibling onto ONE axis, the widest, clamps the narrower
+regions' reads onto it (``host % extent``) and guards their stores by their own extent. One
+enumeration, the tensor-core tier preserved (the tiled root still finds an ``(m, n)`` pair on the
+grid), and the redundant recompute gone.
 
 The oracle is the placement's own arithmetic plus the guards the narrow regions carry.
 """
 
 from __future__ import annotations
-
-import pytest
 
 from emmy.compiler.context import Context
 from emmy.compiler.dim import Dim
@@ -37,11 +36,6 @@ from emmy.compiler.target import set_target
 _CAP = (12, 0)
 _TOKENS = Dim("num_tokens")
 _K, _N_Q, _N_KV = 64, 64, 32  # q's N differs from k/v's — two output extents on one kernel
-
-#: Why these are open: the promotion still appends one free axis per sibling sweep. Closing it
-#: needs a per-region store guard, which the masked-N machinery spells only for the TILED
-#: root's own store (``_atom._guard_writes`` off a ``Side``), not for a sibling riding the grid.
-_GAP = "sibling output sweeps still promote as a product grid (stage-2b bug 6)"
 
 
 def _qkv_graph() -> Graph:
@@ -79,14 +73,12 @@ def _static_extents(tile: TileOp) -> list[int]:
     return [axis.extent.as_static() for axis in tile.place.free if axis.extent.is_static]
 
 
-@pytest.mark.xfail(strict=True, reason=_GAP)
 def test_sibling_output_sweeps_promote_onto_one_axis() -> None:
     """Two output extents (64, 32) must leave ONE static free axis, the wider — not both."""
     extents = _static_extents(_the_tile())
     assert extents == [_N_Q], f"expected one shared output axis of {_N_Q}, got free extents {extents}"
 
 
-@pytest.mark.xfail(strict=True, reason=_GAP)
 def test_the_grid_enumerates_its_output_cells_once() -> None:
     """The product of the free extents is the SUM shape, not the product of the output widths: the
     32x recompute the per-sibling promotion caused."""
@@ -97,7 +89,6 @@ def test_the_grid_enumerates_its_output_cells_once() -> None:
     assert product == _N_Q, f"grid enumerates {product} output columns; one enumeration is {_N_Q}"
 
 
-@pytest.mark.xfail(strict=True, reason=_GAP)
 def test_the_narrow_outputs_guard_their_stores_and_the_widest_does_not() -> None:
     """k and v live on the first 32 columns of a 64-wide axis, so their stores are guarded by that
     extent; q spans the axis and takes no such guard."""

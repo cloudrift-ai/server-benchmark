@@ -1997,6 +1997,15 @@ class _MmaOps(_AtomOps):
         frags = (self.frag(f"_c{i}_{j}"), *(_fold_frag(self.frag(f"_c{i}_{j}"), f) for f in range(1, len(chans))))
         writes = [s for s in tail if isinstance(s, Write)]
         body = Body(tail)
+        if len(body.writes) != len(writes):
+            from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
+
+            # A boundary store this sink cannot reach: it folds the tail's TOP-LEVEL writes into
+            # per-cell ``RegStore``\\s, whose only predicate is the fragment's own M/N overhang, so a
+            # write nested under a block — a shared output axis's region bound (``OutputSpec.guard``),
+            # an output-sweep ``Loop`` — has no cell to become. Declining the ROW says so; dropping
+            # the write would emit a kernel that silently never stores that output.
+            raise RuleSkipped("a boundary write nested under a block has no fragment cell to store from", reject=True)
         out = []
         for write in writes:
             cone = body.backward_cone((write.value,))

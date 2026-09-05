@@ -813,14 +813,15 @@ class Fold:
 
         def attach(term: Fold, kind: str, target: list[Stmt], node: tuple[str, ...], scope: frozenset[str]) -> None:
             # The stores over what ``term`` defines as ``kind`` — its step's results, its carried
-            # state, or its observer's per-step values — land right after it, in ``target``.
+            # state, or its observer's per-step values — land right after it, in ``target``, a
+            # store bounded on a shared output axis under its own bound (:meth:`OutputSpec.guarded`).
             for spec in owned.get((id(term), kind), ()):
                 extra = {name for expr in spec.write.index for name in expr.free_vars()} - scope
                 if not extra:
-                    target.append(spec.write)
+                    target.extend(spec.guarded((spec.write,)))
                     continue
                 assert extra <= set(opened), f"a store reads coordinates {sorted(extra - set(opened))} no term declares and no sweep names"
-                sink((*node, *(name for name in opened if name in extra))).append(spec.write)
+                sink((*node, *(name for name in opened if name in extra))).extend(spec.guarded((spec.write,)))
 
         def place(term: Fold, loops: list[tuple[str, frozenset[str], list[Stmt]]], path: tuple[str, ...] | None) -> None:
             # ``loops``: the reduce loops enclosing this position, outermost first, as (axis, scope, stmts).
@@ -884,10 +885,26 @@ def _(s: Fold, rename, sigma, axis_fn):
         mapped = sigma.get(name) if sigma is not None else None
         return mapped.name if isinstance(mapped, Var) else rename(name)
 
-    lift = Lambda(
-        params=(*lead, *(_param(p) for p in s.lift.params[len(lead) :])),
-        body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
-        results=tuple(rename(r) for r in s.lift.results),
+    def _substituted(name: str) -> bool:
+        # A coordinate σ answers with an EXPRESSION rather than a variable — the shared output
+        # axis's clamp ``a1_1 → a1 % 32`` — binds nothing here any more: the body reads that
+        # expression's own coordinates instead.
+        mapped = sigma.get(name) if sigma is not None else None
+        return mapped is not None and not isinstance(mapped, Var)
+
+    arity = sum(len(edge.exposes) for edge in operands)
+    # Re-CLOSED, not re-wrapped: σ widens what the body reads, so the coordinates it introduced
+    # append as TRAILING params while the operand-correspondence prefix — the iteration var and one
+    # param per operand result component — stays exactly where every positional reading expects it.
+    # With no substituted coordinate the residual is empty and this is the plain rename it was.
+    lift = Lambda.closing(
+        (
+            *lead,
+            *(_param(name) for name in s.lift.params[len(lead) : len(lead) + arity]),
+            *(_param(name) for name in s.lift.params[len(lead) + arity :] if not _substituted(name)),
+        ),
+        Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
+        tuple(rename(r) for r in s.lift.results),
     )
     combine = s.combine.rename(rename) if s.combine is not None else None
     observe = None

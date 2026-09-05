@@ -2004,7 +2004,16 @@ class _MmaOps(_AtomOps):
             if not used:
                 from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
-                raise RuleSkipped(f"fragment projection for {write.output!r} reads no contraction accumulator")
+                # This row's lowering DECLINING the offered schedule, not a benign skip: the kernel
+                # writes an output this contraction does not produce, which no ``(m, n)`` cell of it
+                # can store. ``reject=True`` records it in the run's rejection list so the greedy
+                # blocklist retires the row; as a plain skip nothing was recorded and the search
+                # re-derived the same dead candidate on every visit (every NVFP4 post-attention
+                # re-encode candidate, 12 of 12).
+                raise RuleSkipped(
+                    f"fragment projection for {write.output!r} reads no contraction accumulator",
+                    reject=True,
+                )
             primary = used[0]
             extra = tuple((accs[f], frags[f]) for f in used[1:])
             epi = _warp_epilogue([*cone.members, write], accs[primary], m.axis.name, n.axis.name, sigma, extra_accs=extra)

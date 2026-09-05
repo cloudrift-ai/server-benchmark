@@ -1286,9 +1286,14 @@ cached `perf` rows ensure no re-bench on warm starts. Greedy compiles build no t
 `Search`.
 
 **`terminal_bench.bench_terminal_async`** is the only path that knows about all four parts (graph, DB, tree-through-`search.observe`,
-backend). It short-circuits when every `CudaOp` in the graph already has a `perf` row for the current `(context_key,
-backend)`. Otherwise it does one `await backend.benchmark_async(...)`, walks `Op.source` once to record op inventory +
-lowering edges + the `perf` row per kernel, and returns the aggregate `PerfStats` for the search to score.
+backend). It short-circuits from the `perf` cache in two cases. A kernel whose row is a `bench_fail` fails every slice
+it is in — its identity is its rendered source and launch geometry, the same bytes wherever it appears — so one such
+row decides the slice as `bench_fail`, blamed exactly as recorded, and the other kernels need no row of their own (an
+all-or-nothing lookup re-benched every hang on every fresh session, because a failure is recorded only against the
+kernel the watchdog named and the innocent kernels stay rowless). An `ok` replay needs every `CudaOp`'s row for the
+current `(context_key, backend)`: the bench runs the whole graph, so a partial cache cannot stand in for the Σ.
+Otherwise it does one `await backend.benchmark_async(...)`, walks `Op.source` once to record op inventory + lowering
+edges + the `perf` row per kernel, and returns the aggregate `PerfStats` for the search to score.
 Tune terminals request one nominal warmup; the CUDA benchmark's existing clock-ramp floor extends that warmup until
 it covers 10 ms of GPU time. A slow candidate therefore spends one iteration warming instead of exhausting the
 run-stage budget on discarded repeats. Pinned and deployable comparisons retain their caller-selected warmup count.

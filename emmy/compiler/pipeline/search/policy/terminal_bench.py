@@ -87,6 +87,15 @@ class TerminalBench:
 
         return PerfStats(median=us, min=us, max=us, mean=us, variance=0.0, n_samples=0)
 
+    def _fail_verdict(self, us: float, status: str = "bench_fail"):
+        """The terminal's value when it cannot be priced: every kernel at the fail sentinel ``us``
+        — the Σ a fresh failure returns, so a replayed one scores the same."""
+        return self._point_stats(us * len(self.cuda_nodes)), status
+
+    def _cached_row(self, node):
+        key = node.op.identity_key(with_io=True, with_knobs=True)
+        return self.db.lookup_perf(self.context_key, key, backend=self.backend_name) if key is not None else None
+
     @staticmethod
     def _stats_from_launch(lt):
         return stats_from_launch(lt)
@@ -132,29 +141,28 @@ class TerminalBench:
         if not self.cuda_nodes:
             return "done", (self._point_stats(0.0), "ok")
 
-        # Cache lookup: if every CudaOp already has a perf row for this
-        # (context, backend), skip the benchmark entirely and rebuild the
-        # aggregate stats from the DB. Per-kernel partial caching isn't
-        # useful here because ``backend.benchmark`` runs the whole graph.
-        cached_rows = []
-        for node in self.cuda_nodes:
-            key = node.op.identity_key(with_io=True, with_knobs=True)
-            row = self.db.lookup_perf(self.context_key, key, backend=self.backend_name) if key is not None else None
-            if row is None:
-                cached_rows = None
-                break
-            cached_rows.append(row)
-        if cached_rows is not None:
-            logger.info("[tune] cache hit for %d kernel(s) — skipping bench", len(self.cuda_nodes))
+        # Cache lookup. A kernel with a failed row fails every slice it is in — its identity is
+        # its rendered source and launch geometry, the same bytes wherever it appears — so one such
+        # row decides the slice, blamed exactly as it was recorded, and the other kernels need no
+        # row of their own (the all-or-nothing rule below used to re-bench a hang on every fresh
+        # session because the innocent kernels had none). An ``ok`` replay still needs every
+        # kernel's row: ``backend.benchmark`` runs the whole graph, so a partial cache cannot
+        # stand in for the Σ.
+        rows = [(node, self._cached_row(node)) for node in self.cuda_nodes]
+        failed = [(node, row) for node, row in rows if row is not None and row.status != "ok"]
+        if failed:
+            logger.info("[tune] cache hit: %d of %d kernel(s) recorded %s — skipping bench", len(failed), len(rows), failed[0][1].status)
+            for node, row in failed:
+                self._note(node.op, row.stats, row.status)
+            return "done", self._fail_verdict(failed[0][1].stats.median, failed[0][1].status)
+        if all(row is not None for _node, row in rows):
+            logger.info("[tune] cache hit for %d kernel(s) — skipping bench", len(rows))
             agg = None
-            status = "ok"
-            for node, row in zip(self.cuda_nodes, cached_rows, strict=True):
-                if row.status != "ok":
-                    status = row.status
+            for node, row in rows:
                 agg = self._accumulate(agg, row.stats)
                 self._note(node.op, row.stats, row.status)
                 logger.info("[tune]   %s @ %.2f us  (%s, cached)", row.op_key[:12], row.stats.median, row.status)
-            return "done", (agg or self._point_stats(0.0), status)
+            return "done", (agg or self._point_stats(0.0), "ok")
 
         if self.backend is None:
             # No real measurement → do NOT persist. Writing the 1.0us stub
@@ -196,13 +204,11 @@ class TerminalBench:
             len(self.cuda_nodes),
         )
         s = self._point_stats(fail_us)
-        agg = None
         for node in self.cuda_nodes:
             if id(node) in blamed:
                 self._persist(node.op, stats=s, status="bench_fail", error=f"{type(exc).__name__}: {exc}")
                 self._note(node.op, s, "bench_fail")
-            agg = self._accumulate(agg, s)
-        return agg or self._point_stats(0.0), "bench_fail"
+        return self._fail_verdict(fail_us)
 
     def finalize_result(self, result):
         agg = None

@@ -111,7 +111,7 @@ def scheduled_fold_contraction(fold: Fold, sched):
         block = sched.axis_of(child.axis)
         producer = next((edge for edge in child.operands[0].operands if edge.as_contraction() is not None), None)
         plan = sched.tile_of(producer) if producer is not None else None
-        if plan is None or not plan.is_warp or sched.get("STAGE", producer) is None:
+        if plan is None or not plan.is_warp:
             continue
         if stage.bk_elems != block.extent.as_static() or plan.n.reg * plan.atom.atom_n != stage.bk_elems:
             continue

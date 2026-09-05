@@ -82,22 +82,22 @@ def block_width(extent: int) -> int | None:
     """The block ``extent`` is cut into — the largest power-of-two fraction of it within
     :data:`MAX_BLOCK` — or ``None`` when it is not cut at all.
 
-    A WHOLE number of blocks, always: the alternative is a masked tail on a stream whose channels
-    each carry their own pass over it, and the tail's identity would have to be threaded through
-    the pivot and every channel separately. An odd extent therefore blocks not at all, and neither
-    does one that would come out a single block — that is the unblocked kernel, reached by leaving
-    the term alone rather than by a second spelling of it.
+    A stream no wider than one block is NOT cut: one block is the whole stream, which is the
+    unblocked kernel, and reaching it by leaving the term alone is better than by a second spelling
+    of it. Neither is a stream a whole number of blocks does not fit — the alternative is a masked
+    tail on a stream whose channels each carry their own pass over it, and the tail's identity
+    would have to be threaded through the pivot and every channel separately.
 
     The width is the FORM's, not a decision: the row that schedules a blocked site chunks the block
     with its own ``bk`` exactly as it chunks any other K, so nothing here is a fork and nothing
     downstream sizes itself against a symbol.
     """
     width = extent
-    while width > MAX_BLOCK or width == extent:
+    while width > MAX_BLOCK:
         if width % 2:
             return None
         width //= 2
-    return width
+    return width if width < extent else None
 
 
 def _split_axis(axis: Axis, width: int) -> Axis:

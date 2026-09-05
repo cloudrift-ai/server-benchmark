@@ -100,12 +100,13 @@ def test_the_channels_share_one_binder_and_one_weight() -> None:
 
 @pytest.mark.parametrize(
     ("extent", "width"),
-    [(128, 64), (512, 64), (64, 32), (96, 48), (127, None), (2, 1)],
+    [(128, 64), (512, 64), (96, 48), (64, None), (8, None), (127, None)],
 )
 def test_the_width_is_a_whole_fraction_of_the_stream(extent: int, width: int | None) -> None:
-    """The largest power-of-two fraction within :data:`MAX_BLOCK`. A whole number of blocks always:
-    an odd extent is not cut at all, because a masked tail would have to be threaded through the
-    pivot and every channel separately."""
+    """The largest power-of-two fraction within :data:`MAX_BLOCK`. A stream no wider than one block
+    is not cut at all — that is the unblocked kernel — and neither is one a whole number of blocks
+    does not fit, because a masked tail would have to be threaded through the pivot and every
+    channel separately."""
     assert block_width(extent) == width
     assert width is None or (extent % width == 0 and width <= MAX_BLOCK)
 

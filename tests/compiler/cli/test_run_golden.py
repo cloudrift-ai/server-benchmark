@@ -205,3 +205,15 @@ def test_resolve_golden_arg_prefers_the_document_the_caller_loaded(monkeypatch, 
     with pytest.raises(SystemExit) as excinfo:
         compile_mod.resolve_golden_arg(args)
     assert excinfo.value.code == 2
+
+
+def test_record_greedy_is_a_golden_bench_flag(run_cli):
+    """``--record-greedy`` writes the greedy pick's kernel set back into the benched golden, so
+    like ``--record`` it is refused without the file and the bench that measure it."""
+    args = _parser().parse_args(["run", "--golden", "working.yaml", "--realization", "linear.layer0", "--bench", "--record-greedy"])
+    assert args.record_greedy is True
+
+    rc, stdout, stderr = run_cli("run", "--golden", "working.yaml", "--realization", "linear.layer0", "--record-greedy")
+
+    assert rc == 2
+    assert "--record-greedy requires --golden PATH and --bench" in stdout + stderr

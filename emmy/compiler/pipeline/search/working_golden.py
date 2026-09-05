@@ -531,6 +531,102 @@ def record_latency(
     dump_golden_file(document, destination, overwrite=True, incremental=True)
 
 
+class KernelSetDecisions(PipelineStrategy):
+    """Every kernel-set decision one compile took, as ``(identity, arm knobs)``: the deploy identity
+    of the kernel the fork was offered on and the knobs of the arm its splice carried — a placement
+    cut's ``PLACE@seam: cut``, a cross-CTA split's ``REDUCE`` value. Cleared when a resolve starts,
+    so a greedy retry reports only the resolution that stood."""
+
+    def __init__(self) -> None:
+        self.decisions: list[tuple[str, dict[str, str]]] = []
+
+    def on_run_start(self, event) -> None:
+        del event
+        self.decisions.clear()
+
+    def on_splice(self, event) -> None:
+        from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+
+        identity = event.root_op.identity_key(with_io=True) if isinstance(event.root_op, TileOp) else None
+        if identity is not None:
+            self.decisions.append((identity, {str(key): str(value) for key, value in event.knobs.items()}))
+
+
+def greedy_pick_rows(graph) -> list[tuple[str, dict[str, str]]]:
+    """Each CUDA kernel of a compiled graph, in launch order, as ``(identity, schedule row)``: the
+    deploy identity of the tile kernel it lowered from — what a child-identity schedule receipt
+    names — and the schedule row it realized (the schedule families only; a forkless kernel's row
+    is its OFF anchors, which is what its one enumerated row spells)."""
+    from emmy.compiler.ir.cuda.ir import CudaOp  # noqa: PLC0415
+    from emmy.compiler.ir.tile import TileOp  # noqa: PLC0415
+    from emmy.compiler.pipeline.knob import schedule_row_key  # noqa: PLC0415
+
+    rows: list[tuple[str, dict[str, str]]] = []
+    for node_id in graph.topological_order():
+        op = graph.nodes[node_id].op
+        if not isinstance(op, CudaOp):
+            continue
+        tile = next((ancestor for ancestor in op.source_chain() if isinstance(ancestor, TileOp)), None)
+        identity = tile.identity_key(with_io=True) if tile is not None else None
+        if identity is None:
+            raise ValueError(f"kernel {op.kernel_name} lowered from no tile kernel, so no receipt can name it")
+        rows.append((identity, dict(schedule_row_key(dict(op.knobs or {})))))
+    return rows
+
+
+def record_greedy_pick(
+    path: str | Path,
+    document: dict,
+    name: str,
+    *,
+    decisions: list[tuple[str, dict, float, float]],
+    kernels: list[tuple[str, dict, float, float]],
+    reference_backend: str,
+) -> list[str]:
+    """Write the greedy pick's kernel set back into ``name``'s target as measured realizations.
+
+    ``decisions`` are the kernel-set decisions the compile took — ``(identity, arm knobs, emmy_us,
+    reference_us)``, the identity being the kernel the fork was offered on — and each becomes a
+    routing row: the measured price of that decision, carrying the kernel set's whole-graph
+    timings. ``kernels`` are the CUDA kernels it produced — ``(identity, schedule row, emmy_us,
+    reference_us)`` — and each becomes a child-identity schedule receipt with its own launch
+    timings. Every row takes the seed realization's bindings and input regime and no route: seam
+    spellings are kernel-local, so a cut key copied onto every receipt would re-cut any piece that
+    offers a same-spelled seam; the replay follows the routing rows, each naming its kernel by
+    identity. A row already recorded for the same kernel and knobs takes the new timings, anything
+    else is appended, so a re-record never duplicates. Returns the names written, in order.
+    """
+    destination = Path(path)
+    if is_repository_golden_path(destination):
+        raise ValueError(f"refusing to write measurements into a canonical repository golden: {destination}")
+    from emmy.compiler.pipeline.knob import canonical_row_key, family_of  # noqa: PLC0415
+
+    seeds = [(entry, realization) for entry in document["configs"] for realization in entry["realizations"] if realization["name"] == name]
+    if not seeds:
+        raise ValueError(f"{destination} has no realization named {name!r}")
+    entry, seed = seeds[0]
+    regime = {key: value for key, value in seed["pins"].items() if family_of(str(key)) != "PLACE"}
+    written: list[str] = []
+    for identity, knobs, emmy_us, reference_us in (*decisions, *kernels):
+        row = {
+            "name": f"{name}.{identity[:12]}",
+            "bindings": dict(seed["bindings"]),
+            "pins": dict(regime),
+            "knobs": {str(key): str(value) for key, value in knobs.items()},
+            "identity": identity,
+            "measurements": {"emmy_us": float(emmy_us), "reference_us": float(reference_us), "reference_backend": reference_backend},
+        }
+        key = (identity, canonical_row_key(row["knobs"]))
+        recorded = next((r for r in entry["realizations"] if (r.get("identity"), canonical_row_key(r.get("knobs") or {})) == key), None)
+        if recorded is None:
+            entry["realizations"].append(row)
+        else:
+            recorded["measurements"] = row["measurements"]
+        written.append(row["name"])
+    dump_golden_file(document, destination, overwrite=True, incremental=True)
+    return written
+
+
 def persist_proposal_rankings(path: str | Path, document: dict, target: WorkingGoldenTarget, rankings: list[dict]) -> None:
     """Atomically persist measured proposal feedback for one target of a loaded document."""
     configs = document["configs"]

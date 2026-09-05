@@ -326,8 +326,12 @@ strip it), multi-kernel origins poison their key. A twin program compiles ~750x 
 **The domains and pool identity.** Each `schedule()` call projects fixed independent domains from `p` and `t`, builds
 one immutable `c`, then evaluates Algorithm 1(c, p, t). `Fork.pool_id` stamps the deploy identity, target, ordered
 free-axis extents, exact codec vocabulary, schedule-parameter fingerprint, and split receipt; it keys the greedy
-decision memo without weakening any enumeration input. Sampled lazy enumeration remains behind the explicit classic
-reconstruction boundary.
+decision memo without weakening any enumeration input, and it seeds a budgeted pool's draw. The fingerprint
+(`knob.schedule_pin_fingerprint`) spells the pins as the enumeration reads them: the schedule-family pins as set,
+and the precision gates by effect — a gate `precision_pin` resolves ON, nothing for one OFF or unset — so a regime
+spelled out (a standard-lane golden's `FAST_MATH: false`, published for a replay or the release gate) and an unset
+environment enumerate the same rows, share one stamp, and draw the same subset. Sampled lazy enumeration remains
+behind the explicit classic reconstruction boundary.
 
 **Cost is per kernel; a kernel SET is a sum.** A schedule fork picks one alternative and its cost is that
 alternative's latency. A cut's — and a cross-CTA split's — cost is the minimum sum over the kernels it produces,

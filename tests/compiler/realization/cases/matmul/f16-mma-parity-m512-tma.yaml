@@ -22,7 +22,7 @@ configs:
     origins:
     - o
   realizations:
-  - name: k_matmul_d6de48.9f00986e12f3
+  - name: k_matmul_ecfb6e.5e3f1f960b2c
     bindings: {}
     pins:
       FAST_MATH: false
@@ -31,7 +31,7 @@ configs:
       WORK: w2x2
       REDUCE: ''
       STAGE: d2/smem-tma
-    identity: ac14e61c7efbef25f8764699892f7925373fa0fd8d24948a1c708c05a51c1aa6
+    identity: d1e3435ad77da597a453b9a083e7489f150500b682129d4182adc30ee9be9bbf
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 6.124444581844189

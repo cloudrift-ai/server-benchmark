@@ -78,6 +78,14 @@ describe how a term is used in Emmy; they are not meant to replace a full textbo
 - **Elementwise operation** — An operation independently applied to corresponding tensor elements, such as adding
   two tensors.
 - **Reduction** — Combining many values into fewer values, such as summing a row or finding its maximum.
+- **Blocking (loop blocking)** — Splitting one reduce axis into an outer axis that strides through
+  it and an inner **block** of some width, and re-associating the fold over the two levels. It does
+  not change what a kernel computes, so it is a normalization rather than a decision: the width is
+  read off the stream's own extent, and the schedule chunks the block with the same `bk` it chunks
+  any other reduction axis by. Only a twisted carrier is blocked, and only when a channel comes out
+  of it bilinear — it is what gives attention's expectation channel a semiring to live in. Note the
+  collision with the CUDA sense of *block* below — a block width is a number of loop iterations,
+  never a thread group.
 - **Scan (prefix reduction)** — A reduction that also stores its running state at every step, such as `cumsum`. In
   Emmy a scan is a Fold with an **observer**: a pure per-step function over the carried state whose results only
   kernel-boundary output writes consume. An observed fold preserves its stream order, so it schedules as the serial

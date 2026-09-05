@@ -1726,8 +1726,10 @@ class _AsyncBenchWorker:
         """Send one request, read the response within ``wall_timeout_s`` (else SIGKILL
         + raise ``RuntimeError``), and return the unpickled response. A stale-worker
         race on send respawns and retries once; a response-side timeout is a hard
-        error. A response-side EOF (the child self-destructed mid-job) respawns and
-        retries ONCE after a short drain grace — see the handler for why."""
+        error. A response-side EOF (the child went down mid-job without answering) respawns
+        and retries ONCE after a short drain grace — see the handler for why. A response
+        flagged ``_retire_worker`` (a hung kernel or a poisoned context in the child) retires
+        the child first — SIGKILL + reap — so the next request respawns clean."""
         request = pickle.dumps(request_obj, protocol=pickle.HIGHEST_PROTOCOL)
         frame = len(request).to_bytes(8, "little") + request
         deadline = _time_module.perf_counter() + wall_timeout_s
@@ -1776,20 +1778,30 @@ class _AsyncBenchWorker:
                 await self.aclose()
                 if attempt == 1:
                     raise RuntimeError(f"bench worker EOF before response ({death}); stderr tail: {stderr_tail}") from exc
-                # The child self-destructs (``os._exit``) on a hung kernel to dodge the cupy
-                # atexit deadlock, so a mid-job EOF usually means THIS config hangs — the retry
-                # will EOF again and fail loudly, costing one extra watchdog interval. But right
-                # after a SIGKILL'd predecessor (a greedy-hang wall kill), the dead child's
-                # zombie context can still hold the GPU while the driver tears it down, hanging
-                # an INNOCENT first launch on the fresh child — a transient the golden refresh
-                # sweeps kept hitting on the row right after a hang. One respawn + retry after a
-                # short drain grace tells the two apart (the same row replays clean once the
-                # zombie context is gone).
+                # A mid-job EOF means the child went down without answering (a crash, a signal).
+                # Right after a SIGKILL'd predecessor (a wall kill, or a retired hung child), the
+                # dead child's zombie context can still hold the GPU while the driver tears it
+                # down, taking an INNOCENT first launch on the fresh child down with it — a
+                # transient the golden refresh sweeps kept hitting on the row right after a
+                # hang. One respawn + retry after a short drain grace tells that apart from the
+                # config's own crash (the same row replays clean once the zombie context is
+                # gone); a second EOF fails loudly.
                 logger.info("[bench-worker] child EOF'd mid-job (%s) — draining the device and retrying once%s", death, self._tail_suffix())
                 await asyncio.sleep(min(2.0, max(0.0, deadline - _time_module.perf_counter() - 1.0)))
                 continue
 
             resp = pickle.loads(body)
+            if resp.pop("_retire_worker", False):
+                # The child's verdict that its context is done for: a hung kernel (a watchdog
+                # failure, or a greedy timing that hung after its same-input reference completed)
+                # or a sticky error. Retire it HERE, SIGKILL + reap — the same teardown a wall
+                # overrun takes — rather than trust its own exit: a hung kernel stays resident until
+                # its context dies and the interpreter's CUDA teardown blocks behind it, so the
+                # child left alone is a zombie holding the GPU, and the next request wedges on it
+                # before its first launch and is priced as a wall failure. A queued /
+                # non-terminating kernel must never share a context with the next candidate or a
+                # pinned row.
+                await self.aclose()
             if not resp.get("ok"):
                 # The in-child traceback (and the stderr tail, where CLI-style helpers log
                 # their cause before exiting) would otherwise be silently discarded.
@@ -1800,11 +1812,6 @@ class _AsyncBenchWorker:
                     cache_miss=bool(resp.get("cache_miss")),
                     compile_budget=bool(resp.get("compile_budget")),
                 )
-            if resp.pop("_retire_worker", False):
-                # The child returned a completed same-input reference after its later greedy
-                # timing hit the hung-kernel watchdog. Retire it before returning the reference:
-                # a queued/nonterminating kernel must never share a context with pinned rows.
-                await self.aclose()
             return resp
         raise RuntimeError("bench worker unreachable")  # both attempts exhausted (defensive)
 

@@ -20,8 +20,10 @@ Protocol (length-prefixed pickle on stdin/stdout):
 - Response: ``{"ok": True, "result": BenchmarkResult, "results": dict|None, "torch_available": bool,
   "captured": bool, "run_outputs": dict|None, "accuracy_error": str|None, "run_io": tuple|None,
   "greedy_error": str|None, "reference_run_us": float|None}``
-  or ``{"ok": False, "error": str, "traceback": str, "cache_miss": bool, "compile_budget": bool}``
-  on exception — the two flags rebuild parent-side the exception kinds a pickled string loses.
+  or ``{"ok": False, "error": str, "traceback": str, "cache_miss": bool, "compile_budget": bool,
+  "_retire_worker": bool}`` on exception — the two kind flags rebuild parent-side the exception
+  kinds a pickled string loses; ``_retire_worker`` is the child's own verdict that its context is
+  done for (both response shapes carry it).
 - Worker imports cupy / torch lazily on first request, writes ``<8-byte length><pickled response>``.
 - A ``worker_warmup`` request initializes CuPy and the CUDA context without consuming a candidate's wall budget.
 - EOF on stdin (or parent SIGKILL) terminates the worker.
@@ -37,10 +39,15 @@ illegal / misaligned memory access corrupts the context so that *every*
 subsequent CUDA call returns the same error until the context is destroyed.
 Reusing the worker would then cascade identical false bench_fails across all
 later configs. So after any error we probe the context (:func:`_context_dirty`)
-and, if it's poisoned, send the response and exit — the parent's next request
-sees a dead process and respawns a clean context. Benign failures (NVRTC
-compile errors, OOM that's cleaned up) leave the context healthy and keep the
-worker alive, so they don't pay the respawn cost.
+and, if it's poisoned — or a hung kernel holds it, which no probe can tell —
+answer with ``_retire_worker: True`` and stop serving. The parent SIGKILLs and
+reaps the child on that flag (``program.py`` ``_AsyncBenchWorker.run_job``)
+rather than waiting for an exit of its own: a hung kernel stays resident until
+its context dies, and the interpreter's CUDA teardown blocks behind it, so a
+child left to exit by itself is a zombie that still holds the GPU and wedges
+the next request before its first launch. Benign failures (NVRTC compile
+errors, OOM that's cleaned up) leave the context healthy and keep the worker
+alive, so they don't pay the respawn cost.
 """
 
 from __future__ import annotations
@@ -77,8 +84,8 @@ _RUN_INPUTS_CACHE: dict[str, dict] = {}
 def _hung(exc: BaseException) -> bool:
     """``True`` iff ``exc`` is the per-launch hung-kernel watchdog. A hung kernel is still
     resident on the device, so :func:`_context_dirty`'s ``deviceSynchronize`` probe would block
-    on it forever — treat it as dirty without probing, so the worker exits promptly and process
-    teardown kills the kernel."""
+    on it forever — treat it as dirty without probing, so the worker answers promptly and the
+    parent's SIGKILL (``_retire_worker``) ends the context that holds the kernel."""
     from emmy.compiler.backend.cuda.program import HungKernelError
 
     return isinstance(exc, HungKernelError)
@@ -306,14 +313,19 @@ def main() -> None:
                 if isinstance(exc, SystemExit)
                 else repr(exc)
             )
+            dirty = _hung(exc) or _context_dirty()
             resp = {
                 "ok": False,
                 "error": error,
                 "traceback": traceback.format_exc(),
                 "cache_miss": isinstance(exc, InputsCacheMissError),
                 "compile_budget": isinstance(exc, CompileBudgetExceeded),
+                # The parent retires a dirty child itself (SIGKILL + reap): the ``return`` below
+                # cannot end a hung kernel's context — the interpreter's CUDA teardown blocks
+                # behind the resident kernel, and a request sent to that zombie wedged the next
+                # candidate before its first launch.
+                "_retire_worker": dirty,
             }
-            dirty = _hung(exc) or _context_dirty()
         payload = pickle.dumps(resp, protocol=pickle.HIGHEST_PROTOCOL)
         os.write(out_fd, len(payload).to_bytes(8, "little"))
         os.write(out_fd, payload)

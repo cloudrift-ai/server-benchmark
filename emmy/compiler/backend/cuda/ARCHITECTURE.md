@@ -301,12 +301,18 @@ The wall-clock cap is `asyncio.wait_for`; on overrun the child is SIGKILLed and 
 device. Because the persistent worker is reused across configs, an illegal / misaligned access is a hazard: that error
 is **sticky** — it corrupts the CUDA context so every later call returns the same status until the process dies, which
 would cascade identical false `bench_fail`s across all subsequent configs. So after any failure the worker probes its
-context (`_context_dirty` — a cheap `deviceSynchronize`) and *exits* if it's poisoned; `run_job` respawns a clean
-context on the next request (the dead-proc check before `await self._spawn()`). Benign failures (NVRTC compile errors,
-cleaned-up OOM) leave the context healthy and keep the worker alive, so they pay no respawn cost. A stale-worker race
-on the send (a `BrokenPipeError`/`ConnectionResetError` from `stdin.drain` after the worker's dirty-context exit)
-triggers one respawn + resend before surfacing as `bench worker died during request send`. Error paths `await aclose()`
-(SIGKILL + reap) so the subprocess transport is cleaned before the loop closes.
+context (`_context_dirty` — a cheap `deviceSynchronize`) and, if it's poisoned — or a hung kernel holds it, which no
+probe can tell (`HungKernelError` counts as dirty unprobed) — answers with `_retire_worker: True` and stops serving.
+`run_job` retires a child on that flag **itself**, SIGKILL + reap through `aclose()`, the same teardown a wall overrun
+takes, and the next request respawns a clean context. The child cannot be left to exit on its own: a hung kernel
+stays resident until its context dies and the interpreter's CUDA teardown blocks behind it, so the child became a
+zombie still holding the GPU, the next candidate's request wedged against it before any launch, and the wall budget
+priced *that* configuration as a failure (a 16× V100 host tune recorded six "did not accept the request" rows for
+kernels that never ran). Benign failures (NVRTC compile errors, cleaned-up OOM) leave the context healthy and keep the
+worker alive, so they pay no respawn cost. A stale-worker race on the send (a `BrokenPipeError`/`ConnectionResetError`
+from `stdin.drain` against a child that exited) triggers one respawn + resend before surfacing as `bench worker died
+during request send`. Error paths `await aclose()` (SIGKILL + reap) so the subprocess transport is cleaned before the
+loop closes.
 
 Three transport behaviors worth knowing: (1) the child's **stderr is drained continuously** by a background task into
 a bounded tail — a chatty child (HF shard-download progress, nvcc warnings) would otherwise fill the ~64 KB pipe and

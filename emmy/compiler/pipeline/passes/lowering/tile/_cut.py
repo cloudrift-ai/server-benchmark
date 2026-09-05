@@ -468,6 +468,13 @@ def realize(
     tile: TileOp = root.op
     split_consumed = tile.split_consumed or carries_partition(tile)
     pieces = []
+    # What each replaced cone's result is called once the consumer reads it back — the ONE
+    # rename this pass mints, collected as it is minted. A term's readers follow it for free (a
+    # consumer's params are spelled as the result names of the edge they bind), but the kernel's
+    # boundary stores are NOT part of the term: ``TileOp.output_specs`` names the stored value as
+    # a plain string, so a store of a cut cone's own result has to be re-spelled here or it names
+    # a value the consumer no longer defines.
+    read_names: dict[str, str] = {}
     for seam in seams:
         child = seam.node
         front = seam.frontier
@@ -496,6 +503,10 @@ def realize(
             raw = Load(name=names[0], input=buffers[0], index=index, dtype=front.dtype)
             residue = Lambda.closing((), Body.coerce(Body((raw, *front.residue))), child.lift.results)
             loads = (Fold(operands=(), lift=residue.rename({name: _read_name(name, token) for name in residue.results})),)
+        # The names the consumer reads this workspace back under. A frontier seam's workspace holds
+        # the raw storage waypoint, so its piece is named after the FRONTIER while the consumer
+        # still exposes the cone's decoded results — the rename is over those.
+        read_names.update({name: _read_name(name, token) for name in (names if front is None else child.lift.results)})
         replacements = {id(child): loads}
         for ordinal, (sibling, pairs) in enumerate(seam.siblings):
             # A clustered duplicate reads the SAME workspace, spelled through its own captured
@@ -507,6 +518,10 @@ def realize(
                 Fold.slab(Load(name=_read_name(name, token, ordinal), input=buffer, index=sibling_index))
                 for name, buffer in zip(sibling.exposes, buffers, strict=True)
             )
+            # The representative wins a shared name: a boundary store of a value both occurrences
+            # expose reads the term's own, and only the representative sits on the term's path.
+            for name in sibling.exposes:
+                read_names.setdefault(name, _read_name(name, token, ordinal))
         pieces.append((seam, produced, axes, index, token, names, buffers, replacements))
 
     # Every replacement applies to the consumer AND to every OTHER seam's produced piece: a
@@ -552,7 +567,14 @@ def realize(
         )
 
     parent_stores = tuple(
-        replace(store, write=replace(store.write, output=renamed_outputs.get(store.write.output, store.write.output)))
+        replace(
+            store,
+            write=replace(
+                store.write,
+                output=renamed_outputs.get(store.write.output, store.write.output),
+                values=tuple(read_names.get(value, value) for value in store.write.values),
+            ),
+        )
         for store in tile.output_specs
     )
     consumer = TileOp(

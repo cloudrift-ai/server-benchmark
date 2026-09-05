@@ -1900,7 +1900,11 @@ class _MmaOps(_AtomOps):
                     )
                 ]
             cell = offset[0].base(i)
-            idx = tuple(Sigma({m.axis.name: cell}).apply(e) for e in a_load.index)
+            # The sibling n axis binds too (:func:`_sibling_sigma`): the fragment is shared across
+            # the row, so the read is n-invariant in VALUE, but n can still appear SYNTACTICALLY —
+            # a split-K partition writes its ksplit coordinate into A's k index, and when the pair
+            # places that ksplit on n the bare axis name no longer exists after the tile split.
+            idx = tuple(Sigma({m.axis.name: cell, **_sibling_sigma(n)}).apply(e) for e in a_load.index)
             return [
                 LdmatrixLoad(
                     frag=self.frag(f"_a{i}"),
@@ -1933,7 +1937,7 @@ class _MmaOps(_AtomOps):
                     )
                 ]
             cell = offset[1].base(j)
-            idx = tuple(Sigma({n.axis.name: cell}).apply(e) for e in b_load.index)
+            idx = tuple(Sigma({n.axis.name: cell, **_sibling_sigma(m)}).apply(e) for e in b_load.index)
             return [
                 LdmatrixLoad(
                     frag=self.frag(f"_b{j}"),

@@ -18,6 +18,15 @@ memory-effect reading neither has: a `Write` or an async fill between two identi
 second a different value. A same-name repeat cannot hide such a reload, since a rebind in one C scope is already
 illegal. A name re-bound to a DIFFERENT address is left alone: that is an SSA fault and must surface as one.
 
+The finished body then answers the complementary question, `_unbound_names`: does it read anything its launch never
+supplies? A well-formed kernel reads its own buffers, the symbolic extents passed beside them and the renderer's CTA
+helpers (`lane` / `warp`), and nothing else — every other name is bound by a statement or an enclosing axis, which is
+what `free_names` subtracts. What survives is a value some emission referred to under a spelling nothing defines: a
+per-cell rename whose shared coordinates missed an axis, a staged fill whose σ left a tile axis free, a workspace read
+a boundary store was not re-spelled for. Each of those reached nvcc as *identifier "x" is undefined*, a hundred
+errors deep in a generated source and charged to whichever candidate the tuner happened to be benching. Asserting it
+here names the kernel and the value instead, in the pass that built them.
+
 `factorize` builds the ambient `Ctx` and dispatches `tile.op` through `_factorize`, which peels projecting zero-axis
 `Fold`s and binds each leaf via the ONE root-binding pipeline (`_factor._bind`) — its form is read off the node's
 SCHEDULE (which axes are tiled), never a kernel kind, and

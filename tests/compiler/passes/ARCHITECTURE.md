@@ -43,6 +43,7 @@ tests/compiler/passes/
 ├── test_warp_specialize_deadlock.py # WS=1 stranded-TMA deadlock (Qwen3 k_linear_mean_reduce) regressions
 ├── test_tile_naming.py             # provenance-driven k_<op>_<suffix> kernel naming
 ├── test_shared_constant_cone.py    # one broadcast constant, two sibling cones — one declaration per scope
+├── test_cut_workspace_boundary_store.py # a cut re-spells the consumer's boundary stores, not only its term
 └── test_pipeline_semantics.py      # full pass chain (decompose → opt → fuse) vs numpy
 ```
 

@@ -89,7 +89,6 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     deliberately so: a contraction is a monoid with a ⊗ lift, so it inherits the same swept /
     streamed serial-only exclusions and the same transposed exclusion, with no carve-out of its own.
     """
-    axis = tile.axis_of(node.axis) if node.axis is not None else None
     roots = kernel_roots(tile.op)
     is_root = any(node is root for root in roots)
     if node.observe is not None or not (is_root or any(node is member for root in roots for member in chain_members(root))):
@@ -99,7 +98,7 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
     # ``coop-t`` sweeps the OUTPUT axis so B loads coalesce at every k step, which a STRIDED
     # reduce axis has no reading of: its k steps are blocks, and one lane per output column would
     # sweep a block rather than an element. The other bands ride :attr:`Axis.trips` and do.
-    transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node) and (axis is None or axis.step is None)
+    transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node) and tile.axis_of(node.axis).step is None
     return (
         Reduce(),
         *(choice for choice in coop_reduce_moves() if not choice.coop_transposed or (choice.coop % WARP_LANES == 0 and transposed_ok)),

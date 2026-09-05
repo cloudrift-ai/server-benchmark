@@ -99,6 +99,20 @@ def test_cone_is_one_definition_closed_over_what_it_reads() -> None:
     assert set(fn.cone("w").params) == {"a", "b", "k"} and len(fn.cone("w").body) == 3
 
 
+def test_cone_reads_a_param_as_what_came_in_not_as_the_bodys_write_back() -> None:
+    """A stored combine is not SSA in its states: it takes ``m`` in and writes ``m`` back on the way
+    out to spell its result. The cone of the incoming side's factor must read the ORIGINAL ``m`` —
+    resolving that read forward to the write-back drags the pivot's own advance into the weight and
+    leaves the kernel reading an uninitialized accumulator."""
+    combine = SOFTMAX.program(("m", "l"))
+    beta = combine.cone("m__o__beta")
+    assert beta.params == ("m", "m__o")
+    assert [stmt.name for stmt in beta.body] == ["m__o__gn", "m__o__dg_o", "m__o__beta"]
+    assert all(stmt.op.name != "copy" for stmt in beta.body)
+    # The channel's rescale reads its OWN state the same way — as the param, never as its result.
+    assert "l" in combine.cone("m__o__l_sa").params
+
+
 def test_rename_maps_params_body_and_results_in_lockstep() -> None:
     fn = Lambda(params=("m", "m__o"), body=Body((Assign("t", "maximum", ("m", "m__o")), Assign("m", "copy", ("t",)))), results=("m",))
     renamed = fn.rename({"m": "acc", "m__o": "acc__o", "t": "acc__t"})

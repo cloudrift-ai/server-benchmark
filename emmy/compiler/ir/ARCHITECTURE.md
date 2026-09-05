@@ -521,21 +521,21 @@ canonicalized before validation:
   so the same rule keeps it outside the axes it partitions without a naming convention.
 
 - `eliminate_copy_aliases` — drop `y = copy(x)` Assigns.
-- `unify_sibling_reduce_axes` — rename sibling reduce Loops whose
-  reduce-axis Load positions overlap on any `(source, dim)` pair so
-  they share one canonical axis name (softmax's max + sum sweeps; the
-  two matmul reductions in `silu(x@Wg) * (x@Wu)` that both index `x`
-  at the same K slot). Union-find groups all transitively-overlapping
-  Loops at one scope.
-- `merge_sibling_reduce_loops` — concatenate sibling reduce Loops that
-  share `axis.name` / `extent` into one Loop body. Gated on disjoint
-  SSA defs across the two halves, the second body not reading any name
-  the first body defines (blocks softmax-style sequential reduces
-  where sum-exp reads `acc_max`), and no between-stmt def consumed by
-  the second loop. Eliminates the duplicate K traversal in patterns
-  like `silu(x@Wg) * (x@Wu)`; subsequent normalization collapses the
-  duplicate `x` loads, and the lowering passes stage both weight tensors
-  symmetrically.
+- `unify_sibling_reduce_axes` — rename sibling reduce Loops whose reduce-axis Load positions overlap so they share one
+  canonical axis name (softmax's max + sum sweeps; the two matmul reductions in `silu(x@Wg) * (x@Wu)` that both index
+  `x` at the same K slot). A position is `(source, dim, anchor, coefficient)`, read through `affine_form`: a blocked
+  reduce indexes its stream at `o·B + i` and still walks that dimension, while the anchor keeps `o·B + i` apart from
+  `o·B + 32 + j`, which walk different halves. Union-find groups all transitively-overlapping Loops at one scope.
+- `merge_sibling_reduce_loops` — concatenate sibling reduce Loops that share `axis.name` / `extent` into one Loop body.
+  Every gate is phrased over what the second Loop reads from its ENCLOSING scope (`free_names` — what it uses and does
+  not bind itself): it must read no name the first body defines (blocking softmax-style sequential reduces where
+  sum-exp reads `acc_max`), and no between-stmt def. Names both bodies merely happen to bind are a COLLISION, not a
+  dependence — two alpha-equal copies of one cone always share every spelling — so the incoming body's copies rename
+  apart. Only a name the incoming Loop still binds after it closes (its immediate carriers, which `Loop.render`
+  declares ahead of the loop) refuses, because the rename cannot reach that name's readers outside. Eliminates the
+  duplicate K traversal in patterns like `silu(x@Wg) * (x@Wu)`, and the duplicate score pass between the channels of a
+  blocked twisted carrier; subsequent normalization collapses the duplicate loads, and the lowering passes stage both
+  weight tensors symmetrically.
 - `split_invariant_divides` — rewrite `divide(x, y)` into
   `reciprocal(y) + multiply(x, recip)` when `y` is loop-invariant
   w.r.t. some axis `x` depends on, so the rcp can hoist out of the

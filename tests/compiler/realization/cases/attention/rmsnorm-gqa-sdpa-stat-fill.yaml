@@ -52,33 +52,16 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: true
-      PLACE: fuse
     knobs:
-      WORK: w1x1
-      RASTER: ''
-      TILE@map.1/twist.1/reduce.1/inner: mma_m16n8k16_f16_f32/f1x8
-      TILE@map.1/twist.2/inner: mma_m16n8k16_f16_f32/f1x1/k4
-      TILE@map.1/twist.2/inner.1/map.1/inner: mma_m16n8k16_f16_f32/f1x8
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/reduce: ''
-      REDUCE@map.1/twist.1/reduce.1/inner: ''
-      REDUCE@map.1/twist.1/reduce.1/inner.1/map.3/map.1/reduce: ''
-      REDUCE@map.1/twist.1/reduce.1/inner.2/map.3/map.1/reduce: ''
-      REDUCE@map.1/twist.2/inner: ''
-      REDUCE@map.1/twist.2/inner.1/map.1/inner: ''
-      REDUCE@map.1/twist.2/inner.1/map.1/inner.2/map.3/map.1/reduce: ''
-      REDUCE@map.1/twist.3/reduce: ''
-      STAGE@map.1/twist.1/reduce.1/inner: d1/smem
-      STAGE@map.1/twist.2/inner: d1/smem
-      STAGE@map.1/twist.2/inner.1/map.1/inner: d1/smem
+      PLACE: fuse
     identity: c0c2af1195acd28c8b1f4995bb4fdf51cf10664e358dd3bb9b3f2a346a94c749
-  - name: k_sdpa_rms_norm_reduce_699e75.e217edae53fd.15b4b196be6f
+  - name: k_sdpa_rms_norm_reduce_baf6b4.e43185b73196.666d306acaab
     bindings: {}
     pins:
       FAST_MATH: true
     knobs: {}
-    identity: 15b4b196be6f8ccecb2150b2c6063b2d85fef954a1cb53173352454c60949cb4
-  - name: k_sdpa_rms_norm_reduce_699e75.e217edae53fd.63933b4691fc
+    identity: 666d306acaabce9ac3cfdf4243aeaab39d2528d142fd4972a1dbad3f164a7a82
+  - name: k_sdpa_rms_norm_reduce_baf6b4.e43185b73196.b250c2f226ea
     bindings: {}
     pins:
       FAST_MATH: true
@@ -100,4 +83,4 @@ configs:
       STAGE@map.1/twist.2/inner.1/map.1/inner: d1/smem
       WORK: w1x1
       RASTER: ''
-    identity: 63933b4691fcbc7252daf9757b6eafb03610f0d62c3b3ebbd8139c9553b72eb5
+    identity: b250c2f226ea5ead82b679995d9bd8d30e76b259cdf4c850ae1d615cb68ddf99

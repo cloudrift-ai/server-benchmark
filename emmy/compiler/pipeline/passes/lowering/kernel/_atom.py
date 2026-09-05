@@ -113,6 +113,12 @@ def scheduled_fold_contraction(fold: Fold, sched):
         plan = sched.tile_of(producer) if producer is not None else None
         if plan is None or not plan.is_warp:
             continue
+        # The score's own A has to be a SLAB. ``_child_contraction_block`` reads the producer's
+        # fragments straight from gmem — it passes the child no stage of its own — so a COMPUTED A
+        # (a fused norm's cone ahead of Q) has no loader on this arm. Refusing here leaves the row
+        # to the ordinary tiers; letting it through asserts inside the atom.
+        if producer.operands[0].as_slab() is None:
+            continue
         if stage.bk_elems != block.extent.as_static() or plan.n.reg * plan.atom.atom_n != stage.bk_elems:
             continue
         return child, tile, stage

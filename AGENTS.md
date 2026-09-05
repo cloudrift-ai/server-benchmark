@@ -2,6 +2,23 @@
 
 This file provides guidance to coding agents when working with code in this repository.
 
+## Communication
+
+Write to the user the way you would speak to them.
+
+- Short sentences. One idea per sentence.
+- Say the few things that matter most. Leave out the rest unless the user asks.
+- No file paths, symbol names, or code unless the user asks for them.
+- Simple technical English. Common words over rare ones.
+- Only established vocabulary: [`GLOSSARY.md`](GLOSSARY.md) terms, other standard repo or field terms, or plain
+  language. Never invent a label.
+- Answer first. Add background only when it changes what the user does next.
+- Disagree when you have reason to. Say what is wrong and what you would do instead. The goal is the right
+  answer, not agreement.
+- Raise a concern or change the direction of the conversation only when the stake is real: a wrong approach,
+  a risk, a much better option. Small things are not worth the interruption. Judge it the way one developer
+  would judge it when talking to another.
+
 ## Project Overview
 
 Emmy is a Python tool for deploying and benchmarking LLM inference on GPU servers. It supports vLLM and SGLang engines, provides a CLI for local and remote (SSH) deployment of models via Docker Compose, plus automated benchmarking across multiple servers.

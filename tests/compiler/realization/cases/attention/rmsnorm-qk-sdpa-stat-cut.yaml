@@ -80,3 +80,11 @@ configs:
       WORK: ''
       RASTER: ''
     identity: e2da8ac3d6411d5ecdd23adee2ba776513cb5c0dc9c9fa870db2fa9b75f1a49a
+  - name: k_sdpa_rms_norm_reduce_4ef985.6a9c8ed5d103.2a457d6fa0a9
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      RASTER: ''
+    identity: 2a457d6fa0a92fe2f215e9273cb9915391ad7a1f2444ebfc392e77c6ca5c808d

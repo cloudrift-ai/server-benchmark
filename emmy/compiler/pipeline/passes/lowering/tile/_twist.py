@@ -37,19 +37,23 @@ def _terms(root: Fold):
         pending.extend(reversed(term.operands))
 
 
-def _replace(term: Fold, mapping: dict[int, tuple[Fold, int]]) -> Fold:
-    """The tree with every operand in ``mapping`` (by identity) replaced by ``(edge, offset)`` — the
-    replacement and where the old edge's components sit among its results. Binding is positional,
-    so a reader keeps its own param names and only their order follows the new operands; an
-    operand reached twice binds once, and a component no old edge covered binds a fresh name."""
+def _replace(term: Fold, mapping: dict[int, tuple[Fold, dict[int, int]]]) -> Fold:
+    """The tree with every operand in ``mapping`` (by identity) replaced by ``(edge, seats)`` — the
+    replacement and, per old component, WHICH of its results now carries that value. Binding is
+    positional, so a reader keeps its own param names and only their order follows the new
+    operands; an operand reached twice binds once, and a component no old edge covered binds a
+    fresh name.
+
+    Seats, not an offset: the fused carrier seats each channel where its recipe declares it, so an
+    absorbed edge's components can land interleaved rather than as a run."""
     order: list[Fold] = []
     slots: dict[int, list[str | None]] = {}
     for param, edge, index in term.bindings:
-        new, offset = mapping.get(id(edge), (edge, 0))
+        new, seats = mapping.get(id(edge), (edge, None))
         if id(new) not in slots:
             order.append(new)
             slots[id(new)] = [None] * len(new.exposes)
-        slots[id(new)][offset + index] = param
+        slots[id(new)][index if seats is None else seats[index]] = param
     operands = tuple(_replace(edge, mapping) for edge in order)
     if len(operands) == len(term.operands) and all(a is b for a, b in zip(operands, term.operands, strict=True)):
         return term
@@ -157,11 +161,17 @@ def _candidates(term: Fold):
     projection composed in, so a pivot behind one is an operand, and hoisted again after that."""
 
     def spellings(candidate: Fold):
-        yield candidate, lambda fused, offset: (fused, offset)
+        yield candidate, lambda fused, candidate=candidate: (fused, _seats(candidate, fused))
         hoisted = _hoist_invariant(candidate)
         if hoisted is not None:
             inner, epilogue = hoisted
-            yield inner, lambda fused, offset, inner=inner, epilogue=epilogue: (_replace(epilogue, {id(inner): (fused, offset)}), 0)
+            # The epilogue stands in for the whole candidate, so it exposes one result and seats it first.
+            # The epilogue stands in for the whole candidate: it exposes the state under its
+            # original name, so the reader above seats that one component first.
+            yield (
+                inner,
+                lambda fused, inner=inner, epilogue=epilogue: (_replace(epilogue, {id(inner): (fused, _seats(inner, fused))}), {0: 0}),
+            )
 
     yield from spellings(term)
     for edge in term.operands:
@@ -174,8 +184,8 @@ def _candidates(term: Fold):
 
 def _click(root: Fold, axes: dict) -> dict[int, tuple[Fold, int]] | None:
     """The first fusion some recipe accepts anywhere in the tree, as the operand replacement it
-    implies — the dependent and its pivot both become the fused fold, the dependent's state its
-    last, the pivot's its first."""
+    implies — the dependent and its pivot both become the fused fold, each of their states seated
+    where the fused carrier now carries it (:func:`_seats`)."""
     for term in _terms(root):
         # A reduce reading a reduce — directly, or through a projection of one (Welford's mean).
         if term.axis is None or not any(edge.axis is not None or _reads_reduce(edge) for edge in term.operands):
@@ -185,17 +195,29 @@ def _click(root: Fold, axes: dict) -> dict[int, tuple[Fold, int]] | None:
                 fused = candidate.fuse(recipe, axes)
                 if fused is not None:
                     pivot = _pivot_of(candidate, fused)
-                    return {id(term): stands_in(fused, len(fused.exposes) - len(term.exposes)), id(pivot): (fused, 0)}
+                    return {id(term): stands_in(fused), id(pivot): (fused, _seats(pivot, fused))}
     return None
 
 
+def _seats(edge: Fold, fused: Fold) -> dict[int, int]:
+    """Where each of ``edge``'s components sits among ``fused``'s — by NAME, because the fusion
+    carries the absorbed states' own spellings and seats them in the recipe's declared order."""
+    where = {name: index for index, name in enumerate(fused.exposes)}
+    return {index: where[name] for index, name in enumerate(edge.exposes) if name in where}
+
+
 def _pivot_of(dependent: Fold, fused: Fold) -> Fold:
-    """The operand of ``dependent`` the fusion absorbed — the one whose states lead ``fused``'s."""
+    """The operand of ``dependent`` the fusion absorbed — the reduce whose whole carrier the fused
+    fold now holds, under the same pivot.
+
+    CONTAINMENT, not a prefix: a channel joins the carrier at the position its RECIPE declares, so a
+    later fusion can seat a state ahead of one the pivot already carried (softmax's denominator
+    lands before an expectation that clicked first)."""
     states = fused.as_reduction().states
     return next(
         edge
         for edge in dependent.operands
-        if edge.axis is not None and states[: len(edge.as_reduction().states)] == edge.as_reduction().states
+        if edge.axis is not None and (carried := edge.as_reduction().states)[0] == states[0] and set(carried) <= set(states)
     )
 
 

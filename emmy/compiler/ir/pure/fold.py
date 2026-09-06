@@ -356,18 +356,20 @@ class Fold:
         """
         return self.lift.rename({param: edge.exposes[index] for param, edge, index in self.bindings})
 
-    @cached_property
-    def read_operands(self) -> tuple[Fold, ...]:
-        """The operands the term's rendered statements actually READ — what :meth:`lower` places.
+    @cached_method
+    def exposing(self, names: tuple[str, ...]) -> Fold:
+        """This term restricted to the results ``names`` — same operands and params, body cut to
+        what those results need.
 
-        Every operand is a SITE the schedule may take, and a twisted carrier's weight cone is one
-        the serial nest has no use for: ψ folds each element against the running pivot, so the
-        absolute ``exp(score)`` the contraction channel multiplies is never evaluated there.
-        Placing it anyway would emit a transcendental per element for nothing. An edge whose value
-        this term passes through (a wrapper's operand, named among :attr:`exposes`) is read.
+        What :meth:`lower` places when a reader takes only SOME of a computed edge's components. A
+        twisted carrier's weight cone carries the score its step folds beside a weight only a
+        schedule wants, and emitting the second costs a transcendental per element for nothing.
+        Memoized on the term.
         """
-        seen = set(self.step().ssa_uses) | set(self.exposes)
-        return tuple(edge for edge in self.operands if not seen.isdisjoint(edge.exposes))
+        if self.axis is not None or self.exposes == names:
+            return self
+        members = tuple(self.lift.body.backward_cone(names).members)
+        return replace(self, lift=replace(self.lift, body=Body(members), results=names))
 
     def binds_axes(self) -> frozenset[str]:
         """The axis this term binds — what the statement-door ``rewrite`` drops from σ for the subtree."""
@@ -761,21 +763,33 @@ class Fold:
             # An operand the factored lift no longer names is the cone's now, not the carrier's.
             read = {name for stmt in body for name in stmt.deps()} | set(results)
             held = [entry for entry in held if not read.isdisjoint(entry[1])]
+            # The carrier is the RECIPE's own vector: the pivot, then the channels it holds in the
+            # order the recipe declares them, whatever order the tree happened to fuse them in.
+            # Softmax's is (m, D, O) whether the denominator or the expectation clicked first, so a
+            # state's position and its channel agree with ``Recipe.base`` and ``Recipe.lift``.
+            channels = (*(() if pivot.twist is None else pivot.twist.channels), *(index for _, index, _ in added))
+            order = sorted(range(len(channels)), key=lambda slot: channels[slot])
+
+            def by_channel(pivot_slot, tail, order=order):
+                """The pivot's slot, then the channel slots in the recipe's declared order."""
+                return (pivot_slot, *(tail[slot] for slot in order))
+
+            states = by_channel(pview.states[0], (*pview.states[1:], *(name for name, _, _ in added)))
+            base_ops = pivot.base.components()
+            ops = by_channel(base_ops[0], (*base_ops[1:], *(recipe.base[1 + index] for _, index, _ in added)))
+            init = by_channel(inits[0], tuple(inits[1:]))
+            channelled = by_channel(results[0], tuple(results[1:]))
             lift = Lambda(
                 params=(pivot.axis, *(p for _, slot in held for p in slot), *pivot.lift.params[1 + arity :]),
-                body=Body(tuple(Body(tuple(body)).backward_cone(tuple(dict.fromkeys(results))).members)),
-                results=tuple(results),
+                body=Body(tuple(Body(tuple(body)).backward_cone(tuple(dict.fromkeys(channelled))).members)),
+                results=tuple(channelled),
             )
-            states = (*pview.states, *(name for name, _, _ in added))
-            ops = (*pivot.base.components(), *(recipe.base[1 + index] for _, index, _ in added))
-            carried = () if pivot.twist is None else pivot.twist.channels
-            twist = Twist(recipe=recipe, channels=(*carried, *(index for _, index, _ in added)))
             return Fold(
                 operands=tuple(edge for edge, _ in held),
                 lift=lift,
-                init=tuple(inits),
+                init=tuple(init),
                 base=Lambda.componentwise(ops, states),
-                twist=twist,
+                twist=Twist(recipe=recipe, channels=tuple(channels[slot] for slot in order)),
             )
         return None
 
@@ -895,12 +909,20 @@ class Fold:
         owned: dict[tuple[int, str], list[OutputSpec]] = {}
 
         def placed(term: Fold) -> tuple[Fold, ...]:
-            # An operand is placed when the term READS it, or when the tree below it defines a
-            # value the kernel STORES — a nested output sweep is materialized for its own store,
-            # not for its reader. Everything else is a site the schedule may take and the nest has
-            # no use for (:attr:`read_operands`).
-            kept = {id(edge) for edge in term.read_operands}
-            return tuple(edge for edge in term.operands if id(edge) in kept or _writes_under(edge, writing))
+            # An operand is placed for the COMPONENTS the term reads, or whole when the tree below
+            # it defines a value the kernel STORES — a nested output sweep is materialized for its
+            # own store, not for its reader, and narrowing it would lose that store's owner. An
+            # edge no component of which is read is a site the schedule may take and the nest has
+            # no use for; one only partly read costs only the part.
+            seen = set(term.step().ssa_uses) | set(term.exposes)
+            out = []
+            for edge in term.operands:
+                kept = tuple(name for name in edge.exposes if name in seen)
+                if _writes_under(edge, writing):
+                    out.append(edge)
+                elif kept:
+                    out.append(edge.exposing(kept))
+            return tuple(out)
 
         for spec in stores:
             key = origin.get(spec.write.values[0])

@@ -44,10 +44,10 @@ configs:
       FAST_MATH: false
       PLACE@map.1/twist.3/inner: cut
     knobs:
-      TILE@map.1/twist.1/inner: mma_m16n8k16_f16_f32/f1x2
+      TILE@map.1/twist.1/map.1/inner: mma_m16n8k16_f16_f32/f1x2
       TILE@map.1/twist: mma_m16n8k16_f16_f32/f1x1
       STAGE@map.1/twist: d1/smem
       WORK: w1x1
       REDUCE: ''
       RASTER: ''
-    identity: e77f8f4ee3821c2bc2c8db5c48fc923d451ebfd5246b80a426cf860f8d179d43
+    identity: 0890b6f03fbf286199182922b37bc823e757a61639d43bcfb9f169594e382083

@@ -4,7 +4,7 @@
 # hidden=1024 heads=16 kv_heads=8 head_dim=128, fp32, seq 512. One of the twelve layer-0
 # kernels the perf suite curated before the corpus became its case source.
 #
-# The schedule is SITE-SCOPED (TILE@map.1/twist.1/inner is the score, TILE@map.1/twist the weighted sum) because a flash
+# The schedule is SITE-SCOPED (TILE@map.1/twist.1/map.1/inner is the score, TILE@map.1/twist the weighted sum) because a flash
 # tree decides per site. It is also the row a greedy compile REALIZES on this shape, read off
 # the resolved kernel.
 #
@@ -46,10 +46,10 @@ configs:
     pins:
       FAST_MATH: false
     knobs:
-      TILE@map.1/twist.1/inner: ''
+      TILE@map.1/twist.1/map.1/inner: ''
       TILE@map.1/twist: f1
       REDUCE: ''
       STAGE: ''
       RASTER: ''
       WORK: t32x8
-    identity: 5f598fabd4c834e42f1dc3956b951402c035dcd9ffefc23ab64fba745494de32
+    identity: fcd6b33326c5bd6c7db173962b844167d6b8569e1369eb28a954fd9088ad3f30

@@ -1,7 +1,7 @@
 # Reduced Qwen3 decoder attention: fp16 RMSNorm feeding causal grouped-query attention.
 #
 # evidence: repeated strict O3 A100 measurements materialize the clustered normalized-K value
-# through PLACE@map.1/twist.1/inner.2/map in one cooperative producer plus one consumer,
+# through PLACE@map.1/twist.1/map.1/inner.2/map in one cooperative producer plus one consumer,
 # reaching 6.91-7.01 us against torch.compile's 10.09 us for this exact target.
 compute_cap:
 - 8
@@ -65,16 +65,16 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: true
-      PLACE@map.1/twist.1/inner.2/map: cut
+      PLACE@map.1/twist.1/map.1/inner.2/map: cut
     knobs:
       TILE: ''
       WORK: t8
       REDUCE: coop
-      REDUCE@map.1/twist.1/inner: ''
-      REDUCE@map.1/twist.1/inner.1/map.3/map.1/reduce: ''
+      REDUCE@map.1/twist.1/map.1/inner: ''
+      REDUCE@map.1/twist.1/map.1/inner.1/map.3/map.1/reduce: ''
       STAGE: ''
       RASTER: ''
-    identity: ab6b8b74845051b16500e0540519e9010eac19925896abc5da698a84a6b8824a
+    identity: 384f1b88ca045618441b6408a4be30e969f4a9f55172063bf065526db48c5c95
   - name: k_sdpa_rms_norm_reduce_deba55.f77edf4b7e93.9a8d71ef07fd
     bindings: {}
     pins:

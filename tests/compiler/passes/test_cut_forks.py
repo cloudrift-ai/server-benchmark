@@ -266,8 +266,8 @@ def test_computed_operand_offers_fused_and_cut_and_pinned_cut_lowers(side: str) 
 def test_sdpa_score_cut_is_offered_and_pinned_cut_lowers(causal: bool) -> None:
     offered = _offered(_sdpa_graph(causal), frontend=True)
     assert {"PLACE": "fuse"} in offered
-    assert {"PLACE@map.1/twist.1/inner": "cut"} in offered
-    lowered = _lower_cut(_sdpa_graph(causal), "PLACE@map.1/twist.1/inner")
+    assert {"PLACE@map.1/twist.1/map.1/inner": "cut"} in offered
+    lowered = _lower_cut(_sdpa_graph(causal), "PLACE@map.1/twist.1/map.1/inner")
     cuda = [node for node in lowered.nodes.values() if type(node.op).__name__ == "CudaOp"]
     assert len(cuda) == 2 + causal  # the two pieces of the cut; the causal mask is its own pointwise kernel
     workspace = next(node.output for node in cuda if "__place_" in node.id)
@@ -289,7 +289,7 @@ def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None
         "measurements": None,
         "ranking": None,
     }
-    assert decode_record(GoldenRecord(knobs={"PLACE@map.1/twist.1/inner": "cut"}, **fields)) is None
+    assert decode_record(GoldenRecord(knobs={"PLACE@map.1/twist.1/map.1/inner": "cut"}, **fields)) is None
     reason = decode_record(GoldenRecord(knobs={"PLACE@missing": "cut"}, **fields))
     assert reason is not None and "does not resolve" in reason
 
@@ -321,7 +321,7 @@ def test_mimo_cut_preserves_both_outputs_and_lowers_both_pieces() -> None:
 
 
 def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
-    fragment = _nested_attention_cut({"PLACE@map.1/twist.1/inner.2/map": "cut"})
+    fragment = _nested_attention_cut({"PLACE@map.1/twist.1/map.1/inner.2/map": "cut"})
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
 
     assert pieces and all(node.op.placement_decided for node in pieces)
@@ -329,7 +329,7 @@ def test_scoped_place_cut_is_consumed_once_by_both_pieces() -> None:
     match = Match(graph=fragment, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
     # The pin is consumed: the rule offers nothing under PLACE again — its remaining domain (split
     # forks) or, with none pending, its skip.
-    with pinned_knobs({"PLACE@map.1/twist.1/inner.2/map": "cut"}):
+    with pinned_knobs({"PLACE@map.1/twist.1/map.1/inner.2/map": "cut"}):
         try:
             result = _CUT.rewrite(match, node)
         except RuleSkipped as skipped:
@@ -368,17 +368,17 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
     skipped, never an error."""
     match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
     pins = {
-        "PLACE@map.1/twist.1/inner.1/map": "cut",  # the normalized-Q cone
-        "PLACE@map.1/twist.1/inner.2/map": "cut",  # the normalized-K cone
-        "PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce": "cut",  # the K statistic nested inside it
+        "PLACE@map.1/twist.1/map.1/inner.1/map": "cut",  # the normalized-Q cone
+        "PLACE@map.1/twist.1/map.1/inner.2/map": "cut",  # the normalized-K cone
+        "PLACE@map.1/twist.1/map.1/inner.2/map.3/map.1/reduce": "cut",  # the K statistic nested inside it
         "PLACE@map.9/map": "cut",  # no such site here — another kernel's pin
     }
     with pinned_knobs(pins):
         fork = _CUT.rewrite(match, graph.nodes[match.root_node_id])
     assert set(fork.knobs) == {
-        "PLACE@map.1/twist.1/inner.1/map",
-        "PLACE@map.1/twist.1/inner.2/map",
-        "PLACE@map.1/twist.1/inner.2/map.3/map.1/reduce",
+        "PLACE@map.1/twist.1/map.1/inner.1/map",
+        "PLACE@map.1/twist.1/map.1/inner.2/map",
+        "PLACE@map.1/twist.1/map.1/inner.2/map.3/map.1/reduce",
     }
     (fragment,) = fork.expand()
     pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
@@ -391,7 +391,7 @@ def test_composed_scoped_place_pins_cut_together_and_foreign_pins_are_skipped() 
 
 def test_bare_and_scoped_place_cuts_compose_in_one_decision() -> None:
     match, graph = _case_match("attention/rmsnorm-qk-sdpa-composed-cut_xfail_realized.yaml")
-    pins = {"PLACE": "cut", "PLACE@map.1/twist.1/inner.2/map": "cut"}
+    pins = {"PLACE": "cut", "PLACE@map.1/twist.1/map.1/inner.2/map": "cut"}
 
     with pinned_knobs(pins):
         fork = _CUT.rewrite(match, graph.nodes[match.root_node_id])
@@ -412,7 +412,7 @@ def _receipt_fields() -> dict:
         "program_wire": graph_to_wire(_sdpa_graph(False)),
         "origins": ("out",),
         "bindings": (),
-        "pins": (("PLACE@map.1/twist.1/inner", "cut"),),
+        "pins": (("PLACE@map.1/twist.1/map.1/inner", "cut"),),
         "measurements": None,
         "ranking": None,
     }
@@ -477,7 +477,7 @@ def test_evidence_rows_key_each_row_by_the_kernel_it_decides() -> None:
     from emmy.compiler.pipeline.search.golden import evidence_rows, records_override
 
     fields = {**_receipt_fields(), "measurements": {"emmy_us": 1.0, "reference_us": 2.0, "reference_backend": "torch"}}
-    route = {"PLACE@map.1/twist.1/inner": "cut"}
+    route = {"PLACE@map.1/twist.1/map.1/inner": "cut"}
     routing = GoldenRecord(knobs=route, **{**fields, "pins": ()})
     parent = GoldenRecord(knobs={}, **fields)
     lift_identity = _lifted_target(parent).identity_key(with_io=True)
@@ -509,7 +509,7 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -
                 "program": 0,
                 "target": {"origins": ["out"]},
                 "realizations": [
-                    {"name": "sdpa.child", "bindings": {}, "pins": {"PLACE@map.1/twist.1/inner": "cut"}, "knobs": {"WORK": "w4x2"}}
+                    {"name": "sdpa.child", "bindings": {}, "pins": {"PLACE@map.1/twist.1/map.1/inner": "cut"}, "knobs": {"WORK": "w4x2"}}
                 ],
             }
         ],
@@ -518,7 +518,7 @@ def test_receipt_validation_requires_child_identity_and_place_pins_stay_live() -
         validate_golden_file(document)
     document["configs"][0]["realizations"][0]["identity"] = "0" * 64
     validate_golden_file(document)
-    receipt = SimpleNamespace(pin_map={"PLACE@map.1/twist.1/inner": "cut"})
+    receipt = SimpleNamespace(pin_map={"PLACE@map.1/twist.1/map.1/inner": "cut"})
     assert regime_live(receipt), "a receipt's routing pins are its route, never a dead env regime"
 
 
@@ -547,7 +547,7 @@ def test_pool_group_fuses_node_id_respellings_and_keys_on_pins() -> None:
 def _cone_seam() -> CutSite:
     """A bare seam record standing in for a clustered operand cone."""
     node = projection((), (Load(name="w", input="w", index=(Var("n"), Var("k"))),), results=("w",))
-    return CutSite(node=node, spelling="PLACE@map.1/twist.1/inner.2/map", axes=(Axis("n", 8), Axis("k", 8)), dtypes=(F16,))
+    return CutSite(node=node, spelling="PLACE@map.1/twist.1/map.1/inner.2/map", axes=(Axis("n", 8), Axis("k", 8)), dtypes=(F16,))
 
 
 def test_alpha_equivalent_operand_cones_cluster_into_one_seam() -> None:

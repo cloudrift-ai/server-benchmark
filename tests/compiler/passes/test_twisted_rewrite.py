@@ -73,8 +73,9 @@ def test_softmax_rewrites_to_twisted_pair() -> None:
 
 
 def test_sdpa_rewrites_to_twisted_expectation() -> None:
-    """Attention's value channel joins the same carrier: three states, the score contraction and
-    the value slab among the operands, and the ``1/l`` factor hoisted into the epilogue above."""
+    """Attention's value channel joins the same carrier, and the carrier comes out A × B: the
+    weight cone leads, the value slab is the streamed operand, and the score contraction sits under
+    the cone — one node, not one per binder. The ``1/l`` factor hoists into the epilogue above."""
     tile = _tile(
         "F.scaled_dot_product_attention("
         "torch.randn(1, 1, 4, 2, dtype=torch.float16), "
@@ -84,8 +85,9 @@ def test_sdpa_rewrites_to_twisted_expectation() -> None:
     (fold,) = _twisted_folds(tile.op)
 
     assert len(fold.init) == 3
-    assert sum(edge.as_contraction() is not None for edge in fold.operands) == 1
-    assert sum(edge.as_slab() is not None for edge in fold.operands) == 2
+    cone, streamed = fold.operands
+    assert cone.axis is None and streamed.as_slab() is not None
+    assert sum(edge.as_contraction() is not None for edge in cone.operands) == 1, "the one score node"
     assert tile.op.axis is None and any(stmt.op.name == "multiply" for stmt in tile.op.lift.body), "the epilogue applies 1/l once"
 
 

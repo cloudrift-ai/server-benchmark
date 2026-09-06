@@ -232,7 +232,7 @@ def test_promoted_attention_output_sweep_closes_the_a100_b_seam_idempotently() -
     assert all(spec.sweep == () for spec in tile.output_specs)
     assert reconstructed.op is tile.op
     # The authored seam — the score's K cone — is offered on the promoted tree.
-    assert "PLACE@map.1/twist.1/inner.2/map" in {seam.spelling for seam in cuttable_seams(tile)}
+    assert "PLACE@map.1/twist.1/map.1/inner.2/map" in {seam.spelling for seam in cuttable_seams(tile)}
 
 
 # ---- closure at formation ---------------------------------------------------------------------- #

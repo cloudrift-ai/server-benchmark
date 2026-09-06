@@ -639,6 +639,12 @@ class Fold:
             # The closed cone defining ``name`` in the lift, and the VALUE each of its params binds
             # (``None`` for a coordinate: a reduce's state binds that term, a projection's result
             # binds its own cone).
+            for param, edge, index in fold.bindings:
+                # A param this term only PASSES THROUGH is the edge's own cone: the value is the
+                # same whether the statements sit in the lift or in the operand a factoring moved
+                # them to, and a match on the score must not turn on which side of that line it is.
+                if param == name and edge.axis is None:
+                    return cone(edge, edge.exposes[index])
             by_param = {param: edge for param, edge, _ in fold.bindings}
             fn = fold.lift.cone(name)
             values = tuple(
@@ -730,7 +736,10 @@ class Fold:
                 body.extend(instance.body)
                 results.append(instance.results[0])
                 inits.append(init)
-            results = _factor_weights(body, results, held, len(pivot.lift.results))
+            _factor_weights(body, results, held, len(pivot.lift.results))
+            # An operand the factored lift no longer names is the cone's now, not the carrier's.
+            read = {name for stmt in body for name in stmt.deps()} | set(results)
+            held = [entry for entry in held if not read.isdisjoint(entry[1])]
             lift = Lambda(
                 params=(pivot.axis, *(p for _, slot in held for p in slot), *pivot.lift.params[1 + arity :]),
                 body=Body(tuple(Body(tuple(body)).backward_cone(tuple(dict.fromkeys(results))).members)),
@@ -1047,6 +1056,23 @@ def _writes_under(term: Fold, writing: set[int]) -> bool:
     return False
 
 
+def _already_held(stmt: Assign, held: list[tuple[Fold, tuple[str, ...]]]) -> str | None:
+    """The param of an operand component this statement recomputes, or ``None``.
+
+    A hoisted cone keeps the spellings it took with it, so the reader's params and the edge's own
+    results are the same names and the two programs compare directly.
+    """
+    for edge, slot in held:
+        if edge.axis is not None:
+            continue
+        definitions = edge.lift.body.definitions
+        for param, name in zip(slot, edge.exposes, strict=True):
+            own = definitions.get(name)
+            if isinstance(own, Assign) and own.op == stmt.op and own.args == stmt.args:
+                return param
+    return None
+
+
 def _slots(params: tuple[str, ...], edges) -> list[tuple[str, ...]]:
     """``params`` cut into one group per edge — the positional binding, one param per result component."""
     out, cursor = [], 0
@@ -1056,62 +1082,57 @@ def _slots(params: tuple[str, ...], edges) -> list[tuple[str, ...]]:
     return out
 
 
-def _factor_weights(body: list[Stmt], results: list[str], held: list[tuple[Fold, tuple[str, ...]]], start: int) -> list[str]:
-    """Make every factor of a channel's PRODUCT an operand, so the channel reads as a contraction.
+def _factor_weights(body: list[Stmt], results: list[str], held: list[tuple[Fold, tuple[str, ...]]], start: int) -> None:
+    """Hoist a channel's WEIGHT into an operand of its own, so the channel reads as a contraction.
 
     A twisted carrier's expectation channel contributes ``weight ⊗ value`` — one monomial, but the
     weight is a cone over the score, so as it stands the product multiplies a body definition by an
-    operand and no bilinear reading applies. Hoisting that cone out as its own zero-axis operand is
-    what the semiring formation already does for a matmul's decoded A, and it leaves the channel a
-    bare product of two operand edges. A channel whose whole contribution IS that cone (the
-    denominator, ``Sum exp(score)``) then finds it already held and binds it rather than computing a
-    second copy, which is why one score node serves the whole carrier.
+    operand and no bilinear reading applies. Hoisting that cone out is what the semiring formation
+    already does for a matmul's decoded A, and it leaves the channel a bare product of two operand
+    edges: A first, B second, exactly where every reader of a contraction looks for them.
+
+    Every OTHER contribution the cone computes travels with it — the score the pivot folds, the
+    weight the denominator folds — so one cone serves the whole carrier and there is one score node
+    under it. Those results keep their spellings, so what was a body definition becomes a param and
+    nothing renames.
 
     Only the results from ``start`` on are the channels this fusion added; the ones before them are
-    the pivot's own, already factored when it was built. ``body`` and ``held`` are extended in
-    place; the new result names are returned.
+    the pivot's own, already factored when it was built. ``body`` and ``held`` are rewritten in place.
     """
-    bound = {param for _, slot in held for param in slot}
 
-    def operand(name: str, *, create: bool) -> str:
-        # ``name``'s closed cone as an operand — the param of an equal edge already held, or, with
-        # ``create``, a fresh zero-axis term appended under the cone's own result name. Either way
-        # the statement defining it leaves the lift: it is the operand's program now, not the step's.
+    def hoist(name: str) -> None:
         members = tuple(Body(tuple(body)).backward_cone((name,)).members)
-        reads = {n for stmt in members for n in stmt.deps()} - {n for stmt in members for n in stmt.defines()}
+        defined = {n for stmt in members for n in stmt.defines()}
+        carried = [result for result in results if result in defined]
+        if name not in carried:
+            carried.append(name)
+        reads = {n for stmt in members for n in stmt.deps()} - defined
         inner = [(edge, slot) for edge, slot in held if not reads.isdisjoint(slot)]
         cone = Fold(
             operands=tuple(edge for edge, _ in inner),
-            lift=Lambda.closing(tuple(param for _, slot in inner for param in slot), Body(members), (name,)),
+            lift=Lambda.closing(tuple(param for _, slot in inner for param in slot), Body(members), tuple(carried)),
         )
-        for edge, slot in held:
-            if edge.canonical() == cone.canonical():
-                body[:] = [stmt for stmt in body if name not in stmt.defines()]
-                return slot[0]
-        if not create:
-            return name
-        body[:] = [stmt for stmt in body if name not in stmt.defines()]
-        held.append((cone, (name,)))
-        return name
+        body[:] = [stmt for stmt in body if defined.isdisjoint(stmt.defines())]
+        held.insert(0, (cone, tuple(carried)))  # A leads: ``operands[0]`` is what the product multiplies
 
-    definitions = {stmt.name: stmt for stmt in body}
-    out = list(results)
-    for position, result in enumerate(out[start:], start):
-        product = None if result in bound else definitions.get(result)
-        if product is None:
+    for position, result in enumerate(results[start:], start):
+        product = {stmt.name: stmt for stmt in body}.get(result)
+        if isinstance(product, Assign) and (already := _already_held(product, held)) is not None:
+            # The denominator's contribution IS the weight the expectation's product multiplies by,
+            # so it binds that operand instead of computing a second copy of it.
+            results[position] = already
+            body[:] = [stmt for stmt in body if stmt is not product]
             continue
-        if isinstance(product, Assign) and len(product.args) == 2:
-            # A factor that is itself a carried contribution stays in the lift: Welford's ``x·x``
-            # multiplies the pivot's own value by itself, which is one edge and no contraction.
-            free = [arg for arg in product.args if arg in definitions and arg not in out]
-            if not free:
-                continue
-            renamed = {arg: operand(arg, create=True) for arg in free}
-            body[body.index(product)] = replace(product, args=tuple(renamed.get(arg, arg) for arg in product.args))
-            continue
-        # Not a product: the whole contribution may still BE a cone another channel already holds.
-        out[position] = operand(result, create=False)
-    return out
+        if not isinstance(product, Assign) or len(set(product.args)) != 2:
+            continue  # not a monomial over two distinct values — Welford's square is one edge, not a pair
+        bound = {param for _, slot in held for param in slot}
+        free = [arg for arg in product.args if arg not in bound]
+        if len(free) != 1:
+            continue  # already a bare product of operand edges, or a shape this rule cannot orient
+        hoist(free[0])
+        streamed = next((index for index, (_, slot) in enumerate(held) if index and not set(slot).isdisjoint(product.args)), None)
+        if streamed is not None:
+            held.insert(1, held.pop(streamed))  # B second, so the pair reads off the operands in order
 
 
 def _renamed_roles(roles: tuple[tuple[str, str], ...], rename) -> tuple[tuple[str, str], ...]:

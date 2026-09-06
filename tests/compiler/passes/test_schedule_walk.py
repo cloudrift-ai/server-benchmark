@@ -328,13 +328,14 @@ def test_every_computed_statistic_receives_a_node_id(unpinned, monkeypatch) -> N
     rows = _rows(graph)
     assert rows, "the fused attention kernel must still enumerate"
     reduce_keys = {key for row in rows for key in row if key.startswith("REDUCE@")}
-    # Four reduce sites, each keyed by its route: the twisted carrier, the score contraction
-    # under it, and the two norm statistics under the score's Q and K cones.
+    # Four reduce sites, each keyed by its route: the twisted carrier, the score contraction under
+    # its weight cone, and the two norm statistics under the score's Q and K cones. ONE score node —
+    # the cone the carrier's product multiplies by carries it, so no second binder reaches it.
     assert reduce_keys == {
         "REDUCE@map.1/twist",
-        "REDUCE@map.1/twist.1/inner",
-        "REDUCE@map.1/twist.1/inner.1/map.2/map.1/reduce",
-        "REDUCE@map.1/twist.1/inner.2/map.2/map.1/reduce",
+        "REDUCE@map.1/twist.1/map.1/inner",
+        "REDUCE@map.1/twist.1/map.1/inner.1/map.2/map.1/reduce",
+        "REDUCE@map.1/twist.1/map.1/inner.2/map.2/map.1/reduce",
     }
 
 

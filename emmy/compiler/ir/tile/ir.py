@@ -185,6 +185,28 @@ def _dense_axis_suffix(index: tuple, name: str) -> bool:
     return True
 
 
+def promoted_sweep(op, output_specs: tuple[OutputSpec, ...]) -> set[str]:
+    """The output-sweep axes ``op``'s grid binds instead of sweeping — the kernel's grid RANK above
+    its free axes, and the reason a contraction site can name an ``(m, n)`` pair at all.
+
+    Only an axis EVERY store rides promotes: hoisting a shared sweep replicates nothing but the
+    statistics ahead of it, while a sibling nest's own axis would replicate every other nest per
+    cell (DeepSeek-V4 post4096's root: four nests, a 2^56-cell grid). A shared axis promotes only
+    when a contraction operand reads it, so a purely pointwise sweep keeps its loop.
+
+    Two readers, one rule: :meth:`TileOp.__post_init__` applies it, and the cut pass asks it of a
+    candidate piece to decide whether peeling an output off a multi-output kernel would give that
+    piece a grid pair the fused kernel cannot have (``lowering/tile/_cut.py``).
+    """
+    if not output_specs:
+        return set()
+    shared = set.intersection(*({axis.name for axis in store.sweep} for store in output_specs))
+    if not shared:
+        return set()
+    contractions = tuple(site.node for site in sites(op) if site.node.as_contraction() is not None)
+    return {name for name in shared if any(any(name in edge.free_axes for edge in con.operands) for con in contractions)}
+
+
 def _implicit_unit_row(specs: tuple[OutputSpec, ...], free: tuple[Axis, ...]) -> Axis | None:
     """Recover an elided matrix row when every boundary write proves ``[0..., n]``.
 
@@ -357,12 +379,7 @@ class TileOp(Op):
             raise ValueError("cannot canonicalize a TileOp after a schedule has been attached")
         object.__setattr__(self, "op", normalized)
 
-        # Only the kernel's SHARED output sweep — an axis every store rides — promotes: hoisting it replicates
-        # nothing but the statistics ahead of the sweep, while a sibling nest's axis would replicate every
-        # other nest per cell (DeepSeek-V4 post4096's root: four nests, a 2^56-cell grid).
-        contractions = tuple(site.node for site in sites(normalized) if site.node.as_contraction() is not None)
-        shared = set.intersection(*({axis.name for axis in store.sweep} for store in self.output_specs)) if self.output_specs else set()
-        promoted = {name for name in shared if any(any(name in edge.free_axes for edge in con.operands) for con in contractions)}
+        promoted = promoted_sweep(normalized, self.output_specs)
         if not promoted:
             self._own_axes()
             self._validate_schedule()
@@ -603,4 +620,5 @@ __all__ = [
     "apply_output_specs",
     "extract_output_specs",
     "observed_result_names",
+    "promoted_sweep",
 ]

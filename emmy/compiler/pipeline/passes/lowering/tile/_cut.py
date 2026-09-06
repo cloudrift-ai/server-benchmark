@@ -1,12 +1,24 @@
-"""Materialize a stored Fold edge as a workspace kernel boundary.
+"""Materialize a stored Fold edge as a kernel boundary.
 
-The cut is structural: the child Fold keeps its algebra, writes every state component to a
-workspace, and the parent reads those components through ordinary ``Load`` edges. Both pieces
-are fresh unmapped ``TileOp`` objects. Pinned cuts consume placement on both pieces before the
-cut pass continues with cross-CTA reduction splitting; unpinned cuts may expose smaller seams.
-A contraction-operand seam whose cone passes through a storage waypoint cuts THERE instead
-(:func:`storage_frontier`): the workspace holds the raw storage bits and the consumer keeps the
-decode-plus-factors residue.
+The cut is structural: the child Fold keeps its algebra and becomes its own kernel, the parent
+reads what it produced through ordinary ``Load`` edges. Both pieces are fresh unmapped ``TileOp``
+objects. Pinned cuts consume placement on both pieces before the cut pass continues with cross-CTA
+reduction splitting; unpinned cuts may expose smaller seams.
+
+A seam has three realizations, and the seam itself decides which — one site stays ONE decision,
+because at each seam one of them dominates the others outright and there is no trade for the
+evidence to weigh:
+
+- the WORKSPACE cut, the general case: the piece writes every state component to a fresh buffer.
+- the STORAGE-FRONTIER cut (contraction-operand seams whose cone passes through a decode, see
+  :func:`storage_frontier`): the buffer holds the raw storage bits, exact and narrower than the
+  re-rounded result, and the consumer keeps the decode-plus-factors residue.
+- the OUTPUT-OWNING cut (:func:`_output_owners`): where the seam's cone solely produces some of the
+  kernel's OWN outputs, the piece writes those outputs and the sibling piece keeps the rest. The
+  workspace would have held the output's exact bytes at the output's exact dtype, leaving the
+  sibling nothing to do for them but copy, so this deletes a buffer and a copy. It also leaves both
+  pieces single-output, which is what lets the shared-sweep promotion
+  (:func:`~emmy.compiler.ir.tile.ir.promoted_sweep`) bind a sweep the fused kernel had to serialize.
 """
 
 from __future__ import annotations
@@ -25,10 +37,12 @@ from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.schedule.packing import match_packed_pair_node
 from emmy.compiler.ir.stmt import Assign, Body, Load, Write
 from emmy.compiler.ir.tile import OutputSpec, Placement, TileOp
-from emmy.compiler.ir.tile.ops import carries_partition, edge_dtypes
+from emmy.compiler.ir.tile.ir import promoted_sweep
+from emmy.compiler.ir.tile.ops import UnbindableProjection, carries_partition, edge_dtypes, output_regions
 from emmy.compiler.ir.tile.path import family_sites, sites, spell
 from emmy.compiler.pipeline import Match
 from emmy.compiler.pipeline.knob import consume_kernel_row
+from emmy.compiler.pipeline.passes.lowering.tile._split import add_output_piece, output_root
 from emmy.compiler.structural import digest
 from emmy.compiler.tensor import Tensor
 
@@ -52,6 +66,11 @@ class CutSite:
     #: replaces every sibling with workspace loads spelled through its own axes. Object sharing is
     #: the degenerate case (identity, with the identity correspondence).
     siblings: tuple = ()
+    #: ``(tail, stores)`` when this seam's cone solely produces some of the kernel's OWN output
+    #: specifications — those stores and the projection statements only they read — else ``None``.
+    #: A seam with ``owned`` realizes as the output-owning cut (module docstring) and writes no
+    #: workspace, so its ``dtypes`` are empty.
+    owned: tuple | None = None
 
 
 @dataclass(frozen=True)
@@ -208,15 +227,50 @@ def _dtype_table(tile: TileOp) -> dict[int, tuple]:
     return dict(cache)
 
 
+def _output_owners(tile: TileOp) -> dict[int, tuple]:
+    """The root operands that solely produce some of this kernel's outputs AND would bind a grid
+    axis the fused kernel cannot — keyed by operand identity, each mapped to ``(tail, stores)``.
+
+    Two conditions, both structural, both asked of rules that already exist.
+
+    OWNERSHIP is :func:`~emmy.compiler.ir.tile.ops.output_regions`: every output specification must
+    read exactly one operand, the operands' cones over the root body must be disjoint, and together
+    they must cover it. Without it the pieces would not be a partition of the kernel — one of them
+    would have to recompute what it no longer owns.
+
+    RANK is :func:`~emmy.compiler.ir.tile.ir.promoted_sweep`, asked twice: once of the fused kernel,
+    once of the candidate piece. A piece promotes a sweep the whole kernel could not exactly when
+    its stores agree on an axis the sibling's stores do not, so the intersection over ALL stores
+    came up empty — the NVFP4 encode, whose packed codes ride the feature axis and whose block
+    scales ride one sixteenth of it. Where the piece promotes nothing more than the kernel already
+    does, splitting buys a second launch and no grid, so the seam keeps its workspace reading.
+    """
+    op = tile.op
+    if len(tile.output_specs) < 2 or not isinstance(op, Fold) or op.axis is not None or len(op.operands) < 2:
+        return {}
+    try:
+        regions = output_regions(op, tile.output_specs)
+    except UnbindableProjection:
+        return {}
+    fused = promoted_sweep(op, tile.output_specs)
+    return {id(region): (tail, stores) for region, tail, stores in regions if stores and not promoted_sweep(region, stores) <= fused}
+
+
 def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
-    """Every semantically closed stored Fold edge whose workspace dtypes are determined, grouped
-    only by object sharing. A contraction's operand edges are seams too — cutting one materializes
-    the cone feeding the operand into its own kernel and the contraction reads it back as an
-    ordinary load — and they take the explicit contraction-operand dtype rule (`_workspace_dtypes`),
-    except on a block-scaled packed pair, whose operand cones are not seams at all. A seam is
-    offered only where the cone is closed at the axes of every occurrence; a term is closed by
-    construction, so that check names a malformed tree rather than a capture to resolve."""
+    """Every semantically closed stored Fold edge a cut can hand its own kernel, grouped only by
+    object sharing. A contraction's operand edges are seams too — cutting one materializes the cone
+    feeding the operand into its own kernel and the contraction reads it back as an ordinary load —
+    and they take the explicit contraction-operand dtype rule (`_workspace_dtypes`), except on a
+    block-scaled packed pair, whose operand cones are not seams at all. A seam is offered only where
+    the cone is closed at the axes of every occurrence; a term is closed by construction, so that
+    check names a malformed tree rather than a capture to resolve.
+
+    Workspace dtypes must be determined for the seam to be offered — the offer and the realization
+    must agree, and a raise past the offer would kill the compile. An OUTPUT-OWNING seam
+    (:func:`_output_owners`) writes no workspace, so it carries none and that condition does not
+    apply to it."""
     all_sites = sites(tile.op)
+    owners = _output_owners(tile)
     store_dtype_consumers = {
         id(edge): site.node
         for site in all_sites
@@ -258,10 +312,14 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
         # offer: the raw bits dominate the fed-store workspace on both precision (exact vs
         # re-rounded) and footprint (storage width vs store width), so there is no trade for the
         # evidence to decide — one site stays one decision.
-        frontier = storage_frontier(node) if consumer is not None else None
-        dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, tile, consumer, dtype_table)
-        if dtypes is None:
-            continue
+        owned = owners.get(id(node))
+        frontier = storage_frontier(node) if consumer is not None and owned is None else None
+        if owned is not None:
+            dtypes = ()  # the piece writes the kernel's own outputs; there is no workspace to type
+        else:
+            dtypes = (frontier.dtype,) if frontier is not None else _workspace_dtypes(node, tile, consumer, dtype_table)
+            if dtypes is None:
+                continue
         # A seam is evaluated over the coordinates its term READS, not the whole ambient scope: an
         # output sweep the grid carries for a sibling's sake is not one of this workspace's axes.
         axes = tuple(tile.axis_of(name) for name in dict.fromkeys(name for scope in scopes for name in scope) if name in node.free_axes)
@@ -279,9 +337,13 @@ def cuttable_seams(tile: TileOp) -> tuple[CutSite, ...]:
                 axes=axes,
                 dtypes=dtypes,
                 frontier=frontier,
+                owned=owned,
             )
         )
-    return _cluster_value_seams(out, {id(seam.node): seam.frontier is None and store_dtype_consumers.get(id(seam.node)) for seam in out})
+    return _cluster_value_seams(
+        out,
+        {id(seam.node): seam.frontier is None and seam.owned is None and store_dtype_consumers.get(id(seam.node)) for seam in out},
+    )
 
 
 def _cluster_value_seams(seams: list[CutSite], operand_of: dict[int, object]) -> tuple[CutSite, ...]:
@@ -408,9 +470,51 @@ def _input_fragment(match: Match, root: Node) -> Graph:
     return fragment
 
 
+#: The temporary every piece of a placement cut travels under while the fragment is spliced in.
+#: One suffix per rewrite (``_split`` mints ``__split``), so a fragment's names say which decision
+#: minted them.
+_PLACED = "__placed"
+
+
 def output_map(root: Node) -> dict[str, str]:
     """Stable temporary output names used by every cut sibling of ``root``."""
-    return {name: f"{name}__placed" for name in root.buffer_names()}
+    return {name: f"{name}{_PLACED}" for name in root.buffer_names()}
+
+
+def _in_source_order(stores: tuple, order: list[str]) -> tuple:
+    """``stores`` in the kernel's own output-specification order. The ownership partition groups by
+    region; ``apply_output_specs`` reads consecutive same-path stores as one sweep nest, so the
+    pieces must keep the order the kernel spelled rather than the order the partition returned."""
+    return tuple(sorted(stores, key=lambda store: order.index(store.write.output)))
+
+
+def _region_term(regions: tuple, body, results: tuple) -> Fold:
+    """A zero-axis term over ``regions`` and the projection statements they own, exposing
+    ``results`` — the values the stores that stay with it are written from. The results are named
+    rather than derived from the body's last definition: a piece may own several stores, and one
+    that owns a store read straight off a region has no body at all."""
+    bound = tuple(name for region in regions for name in region.exposes)
+    return Fold(operands=regions, lift=Lambda.closing(bound, Body.coerce(body), results))
+
+
+def _region_piece(tile: TileOp, regions: tuple, tail, stores: tuple, placement_decided: bool, split_consumed: bool, spelling: str):
+    """One output-owning piece: the regions' term, the outputs they produce, and the PARENT's free
+    axes. The placement is deliberately the parent's and not the seam's own axes — the piece is a
+    kernel writing the kernel's own outputs, so its grid is settled by the same shared-sweep
+    promotion that settles any single-output kernel's, applied now that the sibling's stores are no
+    longer in the intersection."""
+    piece = TileOp(
+        op=_region_term(regions, tail, tuple(dict.fromkeys(value for store in stores for value in store.write.values))),
+        # The seam token keeps recursive pieces' kernel names distinct, as it does for a workspace
+        # producer — two same-named pieces from different cut levels would launch one kernel twice.
+        name=f"{tile.name}__place_{digest(tile.identity_key(structural=False) or '', spelling)[:10]}",
+        place=Placement(free=tuple(tile.place.free)),
+        axes=tile.axes,
+        output_specs=stores,
+        placement_decided=placement_decided,
+        split_consumed=split_consumed,
+    )
+    return replace(piece, knobs=consume_kernel_row(piece.knobs))
 
 
 def _read_name(name: str, token: str, ordinal: int | None = None) -> str:
@@ -454,18 +558,20 @@ def realize(
     match: Match,
     root: Node,
     seams,
-    renamed_outputs: dict[str, str],
     *,
     placement_decided: bool = False,
 ) -> Graph:
-    """Build the cut fragment for ``seams`` — one producer kernel per seam plus the ONE consumer
-    reading every workspace back. A single seam is the two-kernel cut; several seams are one
-    COMPOSED placement decision (a pinned compile consumes every scoped PLACE pin that resolves
-    on this kernel at once, so the pieces stay decided and the knob row records every spelling).
-    A frontier seam cuts at the cone's storage waypoint: the producer computes the encode prefix,
-    the workspace holds the raw bits, and the consumer keeps the decode + factor residue as its
-    operand cone (which normalization then binds as a raw storage-dtype load with the factors
-    hoisted onto the accumulator epilogue).
+    """Build the cut fragment for ``seams`` — one piece per seam plus the ONE sibling piece that
+    reads what they produced. A single seam is the two-kernel cut; several seams are one COMPOSED
+    placement decision (a pinned compile consumes every scoped PLACE pin that resolves on this
+    kernel at once, so the pieces stay decided and the knob row records every spelling).
+
+    A frontier seam cuts at the cone's storage waypoint: the piece computes the encode prefix, the
+    workspace holds the raw bits, and the sibling keeps the decode + factor residue as its operand
+    cone (which normalization then binds as a raw storage-dtype load with the factors hoisted onto
+    the accumulator epilogue). An OUTPUT-OWNING seam writes the kernel's own outputs instead of a
+    workspace, and the sibling keeps the rest; the two kinds compose, because a workspace cut nested
+    under an output-owning region is applied to that region's term like any other consumer's.
 
     ``placement_decided`` consumes an authoritative pinned PLACE restriction on every piece.
     Unpinned cuts leave it false so fresh pieces can expose and decide smaller seams. A placement
@@ -473,6 +579,8 @@ def realize(
     sliced-axis split receipt."""
     tile: TileOp = root.op
     split_consumed = tile.split_consumed or carries_partition(tile)
+    owning = tuple(seam for seam in seams if seam.owned is not None)
+    seams = tuple(seam for seam in seams if seam.owned is None)
     pieces = []
     # What each replaced cone's result is called once the consumer reads it back — the ONE
     # rename this pass mints, collected as it is minted. A term's readers follow it for free (a
@@ -572,39 +680,68 @@ def realize(
             node_id=buffers[0],
         )
 
-    parent_stores = tuple(
-        replace(
-            store,
-            write=replace(
-                store.write,
-                output=renamed_outputs.get(store.write.output, store.write.output),
-                values=tuple(read_names.get(value, value) for value in store.write.values),
-            ),
+    # A bare reduction carries NO output specification — its grid-cell store is materializer glue —
+    # so the sibling's ports are read off the graph node, not off the stores.
+    consumer_fold, consumer_stores = parent_fold, tile.output_specs
+    consumer_outputs = set(root.buffer_names())
+    if owning:
+        chosen = {index: seam for index, edge in enumerate(tile.op.operands) for seam in owning if seam.node is edge}
+        # The ownership partition, re-derived over the REPLACED root: a workspace cut composed with
+        # these swapped a cone for a slab under one of the regions, and the piece has to carry that
+        # swap. With no such seam the replacement is the identity and this is the same call the
+        # offer made, so the two agree by construction; a composed one replaces operand edges and
+        # leaves the root body alone, which is what the partition reads. Either way it is positional
+        # over the operands, so the regions line up with the seams that chose them.
+        regions = output_regions(parent_fold, tile.output_specs)
+        order = [store.write.output for store in tile.output_specs]
+        for index, seam in chosen.items():
+            region, tail, stores = regions[index]
+            stores = _in_source_order(stores, order)
+            piece = _region_piece(tile, (region,), tail, stores, placement_decided, split_consumed, seam.spelling)
+            reads = _buffer_reads(piece.op)
+            add_output_piece(
+                match,
+                fragment,
+                output_root(root, {store.write.output for store in stores}),
+                piece,
+                _piece_inputs(root, piece.op, tuple(buffer for buffer in all_buffers if buffer in reads)),
+                suffix=_PLACED,
+            )
+        kept = [regions[index] for index in range(len(regions)) if index not in chosen]
+        consumer_stores = _in_source_order(tuple(store for _, _, stores in kept for store in stores), order)
+        # A composed decision may hand every output away; then there is no sibling piece to emit.
+        if not consumer_stores:
+            return fragment
+        consumer_outputs = {store.write.output for store in consumer_stores}
+        consumer_fold = _region_term(
+            tuple(region for region, _, _ in kept),
+            Body(tuple(stmt for _, tail, _ in kept for stmt in tail)),
+            tuple(dict.fromkeys(value for store in consumer_stores for value in store.write.values)),
         )
-        for store in tile.output_specs
-    )
+
     consumer = TileOp(
-        op=parent_fold,
+        op=consumer_fold,
         name=tile.name,
         place=tile.place,
         axes=tile.axes,
-        output_specs=parent_stores,
+        # The stored value each boundary write reads is re-spelled where a workspace cut renamed it;
+        # ``add_output_piece`` re-spells the BUFFER each write targets.
+        output_specs=tuple(
+            replace(store, write=replace(store.write, values=tuple(read_names.get(value, value) for value in store.write.values)))
+            for store in consumer_stores
+        ),
         placement_decided=placement_decided,
         split_consumed=split_consumed,
     )
     consumer = replace(consumer, knobs=consume_kernel_row(consumer.knobs))
-    output_tensors = (
-        replace(root.outputs[0], name=root.outputs[0].name),
-        *(replace(tensor, name=renamed_outputs[name]) for name, tensor in zip(root.buffer_names()[1:], root.outputs[1:], strict=True)),
+    add_output_piece(
+        match,
+        fragment,
+        output_root(root, consumer_outputs),
+        consumer,
+        _piece_inputs(root, consumer_fold, tuple(all_buffers)),
+        suffix=_PLACED,
     )
-    all_buffers = [buffer for *_, buffers in produced_pieces for buffer in buffers]
-    fragment.add_node(
-        op=consumer,
-        inputs=_piece_inputs(root, parent_fold, all_buffers),
-        outputs=output_tensors,
-        node_id=renamed_outputs[root.id],
-    )
-    fragment.outputs.extend(renamed_outputs.values())
     return fragment
 
 

@@ -167,6 +167,11 @@ kernel's schedule rows and keys its evidence row by that identity, including whe
 regenerated
 Loop target contain several kernels and the stored identity must select one. Direct
 contraction-operand cuts remain strict xfails until Tile IR represents their materialized workspace dtype.
+The output-owning cut has its own group there: which seams own an output, that realizing one leaves single-output
+pieces whose placements gain a grid axis, that a piece takes the projection statements its own store reads, and the
+two refusals — a shared epilogue statement no piece can own, and a partition where no piece would gain an axis. The
+shared-epilogue shape is spelled in Python rather than taken from a case: both corpus shapes join their branches with
+an empty root body, so the body-splitting half of the ownership rule has no case to exercise it.
 The recipe program's monoid laws are covered
 independently by `tests/compiler/ir/pure/test_twist.py`; end-to-end softmax and attention accuracy remain covered by
 the e2e suites.

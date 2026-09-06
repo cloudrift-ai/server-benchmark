@@ -31,7 +31,7 @@ from emmy.compiler.ir.schedule import Placement
 from emmy.compiler.ir.stmt import Assign, Write
 from emmy.compiler.ir.stmt.leaves import OutputSpec
 from emmy.compiler.ir.tile import TileOp
-from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, output_map, realize
+from emmy.compiler.pipeline.passes.lowering.tile._cut import cuttable_seams, realize
 from tests.compiler.terms import projection, reduction, slab
 
 _ROW, _COL = Axis("m", Dim(8)), Axis("k", Dim(32))
@@ -63,10 +63,12 @@ def _kernel() -> tuple[Graph, Node]:
 
 
 class _Match:
-    """The one thing ``realize`` asks a match for: the graph it looks input buffers up in."""
+    """What ``realize`` asks a match for: the graph it looks input buffers up in, and the splice
+    identities each piece registers its renamed output ports under."""
 
     def __init__(self, graph: Graph) -> None:
         self.graph = graph
+        self.output: dict[str, str] = {}
 
 
 def _defined(tile: TileOp) -> set[str]:
@@ -86,7 +88,7 @@ def test_a_cut_branch_the_kernel_stores_whole_keeps_its_boundary_store_readable(
     seams = [seam for seam in cuttable_seams(node.op) if seam.node.axis is not None]
     assert seams, "the reducing branch must be offered as a cuttable seam for this shape to arise"
 
-    fragment = realize(_Match(graph), node, (seams[0],), output_map(node))
+    fragment = realize(_Match(graph), node, (seams[0],))
     consumer = next(n for n in fragment.nodes.values() if isinstance(n.op, TileOp) and n.op.op.axis is None)
 
     defined = _defined(consumer.op)

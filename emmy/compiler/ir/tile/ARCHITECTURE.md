@@ -114,6 +114,12 @@ same closed operand edges and placement seams. The invariant also applies when a
 an already-mapped Tile: promotion extends the grid in lockstep with the free axes, so per-cell replication never
 mistakes the swept coordinate for an SSA name.
 
+That rule is `promoted_sweep`, and it has two readers. Construction applies it. The placement fork asks it of a
+CANDIDATE piece: where a kernel's stores ride axes with no axis in common, nothing promotes and the whole kernel keeps
+its one-axis grid, yet each store taken alone may promote its own — the NVFP4 encode, whose packed codes ride the
+feature axis and whose block scales ride one sixteenth of it. That is the question the output-owning cut is offered
+on (`lowering/tile/_cut.py`). Stating the rule once keeps the two answers one rule rather than two copies of it.
+
 **Storage-decode factors hoist to the epilogue.** A product argument whose cone is a STORAGE DECODE
 (`ElementwiseImpl.decodes` — the trait, never an op-name list) times factors constant along the fold
 axis is not left as a computed cone. Formation splits it: the decode is absorbed by the raw slab's storage

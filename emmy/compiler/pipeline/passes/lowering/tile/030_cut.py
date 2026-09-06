@@ -144,15 +144,13 @@ def _placement_forks(match: Match, root: Node, tile: TileOp):
             (spelling,) = chosen
             return DeferredFork(lambda: replace(tile, placement_decided=True), {spelling: "fuse"})
         return DeferredFork(
-            lambda: realize(match, root, chosen, renamed, placement_decided=True),
+            lambda: realize(match, root, chosen, placement_decided=True),
             {seam.spelling: "cut" for seam in chosen},
             structural=True,
         )
 
     options = [DeferredFork(lambda: replace(tile, placement_decided=True), {"PLACE": "fuse"})]
-    options.extend(
-        DeferredFork(lambda seam=seam: realize(match, root, (seam,), renamed), {seam.spelling: "cut"}, structural=True) for seam in seams
-    )
+    options.extend(DeferredFork(lambda seam=seam: realize(match, root, (seam,)), {seam.spelling: "cut"}, structural=True) for seam in seams)
     return options
 
 

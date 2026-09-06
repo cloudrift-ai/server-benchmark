@@ -138,6 +138,18 @@ That rename reaches the term's own readers for free — a consumer's params are 
 they bind — but a kernel-boundary store sits OUTSIDE the term: `TileOp.output_specs` names its stored value as a plain
 string, so the consumer's stores are re-spelled through the same map. Cutting a branch the kernel stores WHOLE leaves
 that store as the only reader the value has, and unre-spelled it names a value the consumer no longer defines.
+A seam whose cone solely produces some of the kernel's OWN outputs realizes as an OUTPUT-OWNING cut instead: the piece
+writes those outputs and the sibling piece keeps the rest, so no workspace is written and no dtype has to be
+determined for one. The ownership test is `ops.output_regions` — every store must read exactly one root operand, the
+operands' cones over the root body must be disjoint and must cover it — and the piece takes the projection statements
+its own stores read. The seam decides between the two readings rather than offering both, on the same ground as the
+storage frontier: the workspace here would hold the output's exact bytes at the output's exact dtype, leaving the
+sibling nothing to do for them but copy. What earns the offer is RANK. A kernel whose stores ride axes with no axis in
+common promotes no sweep and keeps a one-axis grid, so its contraction sites can name no `(m, n)` pair; each store
+taken alone may promote its own, and the fork asks `TileOp`'s own `promoted_sweep` of the candidate piece to find out.
+Where the piece would promote nothing the kernel does not already, splitting buys a second launch and no grid, and the
+seam keeps its workspace reading — the pointwise NVFP4 quantize, whose branches own a store but hold no contraction
+reading it.
 A two-pass softmax's row statistics are not seams of this tree: the twist carries them as
 components of ONE fold, so there is no statistic edge to materialize, and the score contraction and the fold itself
 are the seams that stand there. The unpinned fork offers every seam as its own structural arm. Bare `PLACE=cut`

@@ -445,18 +445,21 @@ def projection_root(edge: Fold) -> Fold | None:
     return reducing[0] if len(reducing) == 1 else None
 
 
-def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Fold, Body, tuple], ...]:
-    """Partition an independent projection by producing root — ``(root, region, tail, stores)`` per
-    operand of ``op``: the reducing root (:func:`projection_root`), the operand term that carries
-    it (the root itself, or its epilogue projection), the root-body statements only that operand's
-    outputs read, and those output specifications.
+def output_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Body, tuple], ...]:
+    """Partition a projection by OUTPUT OWNERSHIP — ``(region, tail, stores)`` per operand of ``op``:
+    the operand term, the root-body statements only that operand's outputs read, and those output
+    specifications, all in the operands' spelling (the form every consumer emits).
 
     Each output specification must read exactly one region, the regions' backward cones over the
-    root body must be disjoint, and together those cones must cover it. This is the structural
-    ownership rule shared by kernel binding and rewrites that turn one MIMO TileOp into fresh
-    pieces. Refusals raise :class:`UnbindableProjection`.
+    root body must be disjoint, and together those cones must cover it. Refusals raise
+    :class:`UnbindableProjection`.
+
+    This is the ownership rule alone. :func:`projection_regions` composes it with the reducing-root
+    resolution the kernel binder needs; the cut pass reads it bare, because a region peeled into its
+    own KERNEL carries whatever root structure it likes (the NVFP4 encode's packed-code branch owns
+    one output over six reducing roots — unbindable as one region of one kernel, ordinary as a
+    kernel).
     """
-    # Rendered: the tail and the stores in the operands' spelling, the form every consumer emits.
     lift = op.applied
     spelled = dict(zip(op.lift.params, lift.params, strict=True))
     output_specs = tuple(replace(spec, write=spec.write.rewrite(lambda name: spelled.get(name, name))) for spec in output_specs)
@@ -478,12 +481,28 @@ def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Fold,
         raise UnbindableProjection("an output-tiled root forest must cover the complete projection")
     if any(members[id(left)] & members[id(right)] for i, left in enumerate(regions) for right in regions[i + 1 :]):
         raise UnbindableProjection("output-tiled root projections may not share tail statements")
+    return tuple(
+        (region, Body(stmt for stmt in lift.body if stmt in members[id(region)]), tuple(grouped[id(region)])) for region in regions
+    )
+
+
+def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Fold, Body, tuple], ...]:
+    """Partition an independent projection by producing root — ``(root, region, tail, stores)`` per
+    operand of ``op``: the reducing root (:func:`projection_root`), the operand term that carries
+    it (the root itself, or its epilogue projection), the root-body statements only that operand's
+    outputs read, and those output specifications.
+
+    The ownership partition is :func:`output_regions`; this adds the binder's own requirement, that
+    each region be ABOUT one reducing term, so ``_bind_roots`` has a node to bind and a split has a
+    fold to slice. A region reading several reducing roots leaves the epilogue with no piece to hand
+    it to.
+    """
     out = []
-    for region in regions:
+    for region, tail, stores in output_regions(op, output_specs):
         root = projection_root(region)
         if root is None:
             raise UnbindableProjection("an output-tiled root must own each output specification independently")
-        out.append((root, region, Body(stmt for stmt in lift.body if stmt in members[id(region)]), tuple(grouped[id(region)])))
+        out.append((root, region, tail, stores))
     return tuple(out)
 
 
@@ -641,6 +660,7 @@ __all__ = [
     "chain_members",
     "kernel_roots",
     "make_cone",
+    "output_regions",
     "projection_regions",
     "projection_tail",
     "reduce_plan",

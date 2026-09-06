@@ -357,10 +357,16 @@ def _piece_inputs(root: Node, body, *first: str) -> list[str]:
     return [*first, *(inp for inp in root.inputs if inp in reads)]
 
 
-def _add_output_piece(match: Match, frag: Graph, root: Node, piece: TileOp, inputs: list[str]) -> Graph:
-    """Add a fresh piece with its owned output ports and arrange their splice identities."""
+def add_output_piece(match: Match, frag: Graph, root: Node, piece: TileOp, inputs: list[str], *, suffix: str = "__split") -> Graph:
+    """Add a fresh piece with its owned output ports and arrange their splice identities.
+
+    ``root`` is the graph-node view of the ports this piece owns — :func:`output_root` narrows a
+    MIMO node to a subset — so slot 0's edge key travels as the node id and every other as its own
+    tensor name. ``suffix`` names the temporary those buffers travel under while the fragment is
+    spliced in: the cross-CTA split mints ``__split``, the kernel-placement cut ``__placed``. ONE
+    suffix per rewrite, so a fragment's temporary names say which decision minted them."""
     buffers = root.buffer_names()
-    renamed = {name: f"{name}__split" for name in buffers}
+    renamed = {name: f"{name}{suffix}" for name in buffers}
     piece = replace(
         piece,
         output_specs=tuple(
@@ -386,7 +392,7 @@ def _one(match: Match, frag: Graph, root: Node, piece: TileOp) -> Graph:
     further", so it merges the replaced op's knobs forward and does not restart the pass scan. The
     atomic partial is a different kernel — its own placement, its own body — and it has to reach
     scheduling carrying nothing of the kernel it replaced."""
-    return _add_output_piece(match, frag, root, piece, list(root.inputs))
+    return add_output_piece(match, frag, root, piece, list(root.inputs))
 
 
 def _wrap(body: Body, operands: tuple) -> Fold:
@@ -440,7 +446,7 @@ def _rebind(term: Fold, node: Fold, replacement: Fold) -> Fold:
     return term if operands == term.operands else replace(term, operands=operands)
 
 
-def _output_root(root: Node, outputs: set[str]) -> Node:
+def output_root(root: Node, outputs: set[str]) -> Node:
     """A graph-node view containing only the output ports owned by one projection Fold."""
     by_name = dict(zip(root.buffer_names(), root.outputs, strict=True))
     ordered = tuple(name for name in root.buffer_names() if name in outputs)
@@ -460,7 +466,7 @@ def _split_projection(tile: TileOp, root: Node, selected: Fold):
     pieces = []
     chosen = None
     for fold, region, body, stores in projection_regions(op, tile.output_specs):
-        node = _output_root(root, {store.write.output for store in stores})
+        node = output_root(root, {store.write.output for store in stores})
         entry = (node, region, body, stores)
         if fold is selected:
             chosen = entry
@@ -479,7 +485,7 @@ def _add_projection_pieces(match: Match, frag: Graph, pieces: tuple, free: tuple
     sibling region again (or raising)."""
     for root, region, body, stores in pieces:
         tile = replace(_piece(_project(region, body, tuple(free)), free, output_specs=stores, axes=root.op.axes), split_consumed=True)
-        _add_output_piece(match, frag, root, tile, _piece_inputs(root, tile))
+        add_output_piece(match, frag, root, tile, _piece_inputs(root, tile))
     return frag
 
 
@@ -582,7 +588,7 @@ def realize_split(match: Match, root: Node, cta: int, finalize: str) -> Graph:
     fin_tile = _piece(
         _project(_rebind(region, node, fin_fold), body, tuple(free)), free, output_specs=fin_stores, axes=_with_axes(tile.axes, fin_axis)
     )
-    result = _add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
+    result = add_output_piece(match, frag, root, fin_tile, _piece_inputs(root, fin_tile, ws_name))
     return _add_projection_pieces(match, result, projection_pieces, free)
 
 

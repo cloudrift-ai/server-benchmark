@@ -14,6 +14,7 @@ from emmy.compiler.dtype import F16
 from emmy.compiler.graph import Graph, Tensor
 from emmy.compiler.ir.axis import Axis, Window
 from emmy.compiler.ir.base import InputOp
+from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.frontend.ir import SdpaOp, SoftmaxOp
 from emmy.compiler.ir.pure.fold import Fold
@@ -73,9 +74,8 @@ def test_placement_cut_preserves_a_cross_cta_split_receipt() -> None:
     pipeline = Pipeline.build(["lowering/tile"], select={"cut"})
     match = pipeline.match(graph, pipeline.passes[0].rules[0])[0]
     seams = cuttable_seams(match.root.op)
-    renamed = output_map(match.root)
 
-    fragment = realize(match, match.root, (seams[0],), renamed)
+    fragment = realize(match, match.root, (seams[0],))
 
     pieces = [node.op for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
     assert pieces and all(piece.split_consumed for piece in pieces)
@@ -716,3 +716,156 @@ def test_every_seam_is_an_unpinned_arm() -> None:
     arms = [dict(option.knobs) for option in options if "cut" in option.knobs.values()]
     seams = cuttable_seams(node.op)
     assert [set(arm) for arm in arms] == [{seam.spelling} for seam in seams]
+
+
+# ---- the output-owning cut -------------------------------------------------------------------- #
+
+
+def _mimo_case(case: str) -> tuple[Graph, object]:
+    """A corpus case's multi-output target as a graph node carrying ALL of its output ports.
+
+    ``_case_match`` keeps one port, which is enough for a single-output target; an output-owning
+    cut hands ports between pieces, so this one has to declare them."""
+    tile = case_target_tile(case)
+    graph = Graph()
+    for name, tensor in tile.inputs.items():
+        graph.add_node(InputOp(), [], tensor, node_id=name)
+    others = [name for name in tile.outputs if name != tile.name]
+    graph.add_node(
+        tile,
+        list(tile.inputs),
+        outputs=(tile.outputs[tile.name], *(tile.outputs[name] for name in others)),
+        node_id=tile.name,
+    )
+    return graph, graph.nodes[tile.name]
+
+
+def _realized(case: str, spelling: str) -> Graph:
+    graph, node = _mimo_case(case)
+    match = Match(graph=graph, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+    renamed = output_map(node)
+    match.output = renamed
+    seam = next(seam for seam in cuttable_seams(node.op) if seam.spelling == spelling)
+    return realize(match, node, (seam,))
+
+
+def test_disjoint_output_sweeps_offer_an_output_owning_seam() -> None:
+    """The NVFP4 encode writes packed codes over the feature axis and one block scale per 16 of
+    them. No axis rides both stores, so the fused kernel promotes nothing and its contractions get
+    no output-axis pair. Each branch owns one store, and owning it is what gives the piece a grid."""
+    tile = case_target_tile("fused/nvfp4-gate-up-requant-place-cut.yaml")
+    owning = {seam.spelling: seam for seam in cuttable_seams(tile) if seam.owned is not None}
+
+    assert set(owning) == {"PLACE@map.1/map", "PLACE@map.2/map"}
+    assert [store.write.output for store in owning["PLACE@map.1/map"].owned[1]] == ["mul_static_fp4_bits"]
+    assert [store.write.output for store in owning["PLACE@map.2/map"].owned[1]] == ["mul_static_fp4_scale_bits"]
+    assert all(seam.dtypes == () for seam in owning.values()), "an output-owning seam writes no workspace to type"
+
+
+def test_output_owning_cut_leaves_single_output_pieces_that_promote() -> None:
+    """Realizing it gives two kernels, each writing ONE of the kernel's own outputs — no workspace
+    between them — and each binding the sweep its store rides as a grid axis. Rank two is what the
+    contraction sites need to name an ``(m, n)`` pair at all."""
+    fragment = _realized("fused/nvfp4-gate-up-requant-place-cut.yaml", "PLACE@map.1/map")
+    pieces = [node for node in fragment.nodes.values() if isinstance(node.op, TileOp)]
+
+    assert len(pieces) == 2
+    assert sorted(fragment.outputs) == ["mul_static_fp4_bits__placed", "mul_static_fp4_scale_bits__placed"]
+    for piece in pieces:
+        assert len(piece.op.output_specs) == 1
+        assert len(piece.op.place.free) >= 2, f"{piece.id} kept a rank-1 placement"
+        assert not any(spec.sweep for spec in piece.op.output_specs), f"{piece.id} still sweeps its store"
+    widths = {piece.op.place.free[-1].extent.as_static() for piece in pieces}
+    assert widths == {256, 32}, "each piece binds its OWN store's width, not the other's"
+
+
+def _epilogue_kernel(shared: bool) -> tuple[Graph, object]:
+    """Two contractions over disjoint output widths under ONE projection body.
+
+    Both NVFP4 encode shapes join their branches with an empty root body, so the ownership
+    partition there is a plain operand split. This shape gives the root a body to divide: an
+    epilogue statement per store when ``shared`` is false, and one statement both stores read when
+    it is true — the case the cover-and-disjointness rule has to refuse, because neither piece can
+    take it without the other losing it."""
+    m, wide, narrow, k = Axis("m", 8), Axis("n", 16), Axis("n2", 4), Axis("k", 8)
+    first = contraction(
+        k, Load(name="a_v", input="a", index=(Var("m"), Var("k"))), (Load(name="b_v", input="b", index=(Var("k"), Var("n"))), "first")
+    )
+    second = contraction(
+        k, Load(name="c_v", input="c", index=(Var("m"), Var("k"))), (Load(name="d_v", input="d", index=(Var("k"), Var("n2"))), "second")
+    )
+    body = [
+        Assign(name="wide_out", op=ElementwiseImpl("negative"), args=("first",)),
+        Assign(name="narrow_out", op=ElementwiseImpl("negative"), args=("second" if not shared else "first",)),
+    ]
+    tile = TileOp(
+        op=projection((first, second), body=body, results=("wide_out", "narrow_out")),
+        name="wide",
+        place=Placement(free=(m,)),
+        axes=(m, wide, narrow, k),
+        output_specs=(
+            OutputSpec(Write(output="wide", index=(Var("m"), Var("n")), value="wide_out"), sweep=(wide,)),
+            OutputSpec(Write(output="narrow", index=(Var("m"), Var("n2")), value="narrow_out"), sweep=(narrow,)),
+        ),
+    )
+    graph = Graph()
+    for name in ("a", "c"):
+        _input(graph, name, (8, 8))
+    _input(graph, "b", (8, 16))
+    _input(graph, "d", (8, 4))
+    graph.add_node(
+        tile,
+        ["a", "b", "c", "d"],
+        outputs=(Tensor("wide", (8, 16), "f16"), Tensor("narrow", (8, 4), "f16")),
+        node_id="wide",
+    )
+    return graph, graph.nodes["wide"]
+
+
+def test_an_output_owning_piece_takes_the_epilogue_statements_its_store_reads() -> None:
+    """A root body divides with the outputs: each piece keeps the statements only its own store
+    reads, so the term it becomes still defines the value it writes."""
+    _, node = _epilogue_kernel(shared=False)
+    owning = {seam.spelling: seam for seam in cuttable_seams(node.op) if seam.owned is not None}
+
+    assert set(owning) == {"PLACE@map.1/inner", "PLACE@map.2/inner"}
+    tail, stores = owning["PLACE@map.1/inner"].owned
+    assert [store.write.output for store in stores] == ["wide"]
+    assert [stmt.defines() for stmt in tail] == [("wide_out",)], "the piece takes its OWN epilogue, not the sibling's"
+
+
+def test_an_output_owning_piece_carries_its_epilogue_into_a_lowerable_kernel() -> None:
+    """Realizing it: two single-output kernels, each rank two, each still computing its epilogue."""
+    graph, node = _epilogue_kernel(shared=False)
+    match = Match(graph=graph, root_node_id=node.id, rule=Rule(name="test", pattern=[]))
+    renamed = output_map(node)
+    match.output = renamed
+    seam = next(seam for seam in cuttable_seams(node.op) if seam.spelling == "PLACE@map.1/inner")
+    fragment = realize(match, node, (seam,))
+    pieces = {piece.id: piece.op for piece in fragment.nodes.values() if isinstance(piece.op, TileOp)}
+
+    assert sorted(pieces) == ["narrow__placed", "wide__placed"]
+    assert [axis.name for axis in pieces["wide__placed"].place.free] == ["m", "n"]
+    assert [axis.name for axis in pieces["narrow__placed"].place.free] == ["m", "n2"]
+    for name, piece in pieces.items():
+        stored = {value for spec in piece.output_specs for value in spec.write.values}
+        defined = {name for stmt in piece.op.lower(axes=piece.axes) for name in stmt.defines()}
+        assert stored <= defined, f"{name} stores a value its term never defines: {sorted(stored - defined)}"
+
+
+def test_a_shared_epilogue_statement_refuses_the_output_owning_cut() -> None:
+    """One statement both stores read belongs to no single piece, so the partition refuses and every
+    seam keeps its workspace reading — the pieces are never a partition of the kernel."""
+    _, node = _epilogue_kernel(shared=True)
+
+    assert all(seam.owned is None for seam in cuttable_seams(node.op))
+
+
+def test_an_output_owning_cut_is_declined_where_no_piece_would_gain_a_grid_axis() -> None:
+    """The same partition over a purely pointwise quantize: both branches own a store, but neither
+    holds a contraction reading it, so promotion has nothing to lift and splitting would buy a
+    second launch and no grid. The seams keep their workspace reading."""
+    tile = case_target_tile("fused/nvfp4-quantize-cut-shared-normalizer.yaml")
+
+    assert len(tile.output_specs) == 2
+    assert all(seam.owned is None for seam in cuttable_seams(tile))

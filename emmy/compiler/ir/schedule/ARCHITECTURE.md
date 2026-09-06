@@ -87,6 +87,13 @@ a root or beside it lowers serially inside its reader, so it carries the serial 
 and one whose reduce reads a boundary store's output sweep. The contraction per-cell tier reads that same
 projection, so a contraction inherits those readings rather than restating them.
 
+One binder fact is a relation between root sites rather than a node domain, so it composes in `extend` beside the
+worker and physical-axis agreements: the binder builds a kernel around several output-tiled roots only where the
+projection partitions its outputs by root (`ops.projection_regions` — each store reads exactly one root's region);
+where it does not, one tiled root is the kernel's root and every other reduce lowers serially, so the context refuses
+a second output-tiled root among those roots. The row that tiled both — a gate/up projection whose one output reads
+both channels — used to be offered, ranked first, and refused at materialize.
+
 A site INSIDE a block is offered only the tiles that consume exactly that block. Two sites sit
 inside one: the CHANNEL, whose K is the block, so its K-step consumes it in one trip; and the SCORE
 the weight cone reads, whose output covers the block in one fragment grid. Both equations are the

@@ -1048,8 +1048,33 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             raster_eligible=node.tile.is_tiled and view.as_contraction() is not None,
         )
 
+    @cached_property
+    def _shared_roots(self) -> frozenset[NodeId]:
+        """The contraction roots that may not be output-tiled together. The kernel binder builds a
+        kernel around several output-tiled roots only where the projection partitions its outputs
+        by root (:func:`~emmy.compiler.ir.tile.ops.projection_regions`); where it does not, one
+        tiled root is the kernel's root and every other reduce lowers serially inside the
+        projection, so a row tiling a second root spells a kernel the binder never builds. The
+        binder's rule, applied at the offer."""
+        from emmy.compiler.ir.tile.ops import UnbindableProjection, kernel_roots, projection_regions  # noqa: PLC0415
+
+        roots = kernel_roots(self.tile_op.op)
+        if len(roots) < 2:
+            return frozenset()
+        try:
+            projection_regions(self.tile_op.op, tuple(self.tile_op.output_specs))
+        except UnbindableProjection:
+            return frozenset(self.tile_op.node_id(root) for root in roots)
+        return frozenset()
+
     def _support_refusal(self, site: NodeId, support: _LocalSupport) -> str | None:
         """Return why one locally supported pick cannot extend this prefix."""
+        if (
+            site in self._shared_roots
+            and support.node.tile.is_tiled
+            and any(self.assignment.nodes[other].tile.is_tiled for other in self._shared_roots if other in self.assignment.nodes)
+        ):
+            return "a second output-tiled root on a projection its outputs do not partition by root"
         why = self._prefix_relation_refusal(
             support,
             work=self._work,

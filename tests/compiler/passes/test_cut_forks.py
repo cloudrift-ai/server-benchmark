@@ -779,6 +779,55 @@ def test_output_owning_cut_leaves_single_output_pieces_that_promote() -> None:
     assert widths == {256, 32}, "each piece binds its OWN store's width, not the other's"
 
 
+def test_peeling_all_but_one_output_leaves_every_piece_single_output() -> None:
+    """Three outputs on three widths: peeling TWO of them in one decision has to leave the sibling
+    holding the third, not nothing. The serving post blocks that emit codes, block scales and a mean
+    take this shape, and one peel there would still leave a two-output sibling."""
+    m, k = Axis("m", 8), Axis("k", 16)
+    widths = {"wide": Axis("n0", 16), "mid": Axis("n1", 8), "narrow": Axis("n2", 4)}
+    edges = tuple(
+        contraction(
+            k,
+            Load(name=f"a_{out}", input="a", index=(Var("m"), Var("k"))),
+            (Load(name=f"b_{out}", input=f"{out}_w", index=(Var("k"), Var(axis.name))), out),
+        )
+        for out, axis in widths.items()
+    )
+    tile = TileOp(
+        op=projection(edges, results=tuple(widths)),
+        name="wide",
+        place=Placement(free=(m,)),
+        axes=(m, k, *widths.values()),
+        output_specs=tuple(
+            OutputSpec(Write(output=out, index=(Var("m"), Var(axis.name)), value=out), sweep=(axis,)) for out, axis in widths.items()
+        ),
+    )
+    graph = Graph()
+    _input(graph, "a", (8, 16))
+    for out, axis in widths.items():
+        _input(graph, f"{out}_w", (16, axis.extent.as_static()))
+    graph.add_node(
+        tile,
+        ["a", *(f"{out}_w" for out in widths)],
+        outputs=tuple(Tensor(out, (8, axis.extent.as_static()), "f16") for out, axis in widths.items()),
+        node_id="wide",
+    )
+    root = graph.nodes["wide"]
+    owning = sorted(seam.spelling for seam in cuttable_seams(root.op) if seam.owned is not None)
+    assert len(owning) == 3, "each branch solely produces one output, so each is an output-owning seam"
+
+    match = Match(graph=graph, root_node_id=root.id, rule=Rule(name="test", pattern=[]))
+    renamed = output_map(root)
+    match.output = renamed
+    seams = {seam.spelling: seam for seam in cuttable_seams(root.op)}
+    fragment = realize(match, root, tuple(seams[spelling] for spelling in owning[:2]))
+    pieces = {piece.id: piece.op for piece in fragment.nodes.values() if isinstance(piece.op, TileOp)}
+
+    assert len(pieces) == 3, "two peeled pieces and the sibling that keeps the third output"
+    assert all(len(op.output_specs) == 1 for op in pieces.values())
+    assert {op.place.free[-1].extent.as_static() for op in pieces.values()} == {16, 8, 4}, "each piece binds its own width"
+
+
 def _epilogue_kernel(shared: bool) -> tuple[Graph, object]:
     """Two contractions over disjoint output widths under ONE projection body.
 

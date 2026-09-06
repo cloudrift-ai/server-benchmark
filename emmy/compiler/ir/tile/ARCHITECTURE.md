@@ -294,7 +294,10 @@ choice. Construction rejects missing, extra, mismatched, or partly attached fact
 - The production walk keeps its catalogs private. Every leaf is accepted by the context before search can observe it;
   an encoded dictionary is never a semantic leaf.
 - Kernel, node, and edge domains are projected independently. Enumeration is the compatible subset of their Cartesian
-  product, so changing traversal order may change work but can never change membership.
+  product, so changing traversal order may change work but can never change membership. The compatibility relations
+  are the kernel binder's own facts read at the offer — worker inventory, physical-axis geometry, fragment seams, and
+  root ownership (a projection whose outputs do not partition by root carries at most one output-tiled root) — so a
+  row the binder would refuse is never enumerated.
 - `ClassicScheduleCodec` is the sole wire boundary. Kernel keys are bare `WORK` / `RASTER`. A node family is bare
   when it has one applicable site and carries the site's route (`TILE@map.1/twist.1/inner`, the same grammar as
   `PLACE`) only when ambiguous. `STAGE` is one value per consumer node and

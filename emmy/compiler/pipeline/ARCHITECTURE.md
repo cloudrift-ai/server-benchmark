@@ -560,7 +560,8 @@ strict evidence refuses a kernel-set fork no measured arm decides. With no measu
 Part 4 describes (`_priced_pick`, the streamed fused-vs-splice comparison, the serial-work floor). Nothing is
 installed on the kernel: a piece a cut or split mints is a brand-new kernel (`knob.consume_kernel_row` strips every
 decision family and every feature), its own forks consult the rows of its own signature, and a piece that fails to
-lower is handled the way any structural pick's is (`Pipeline.run`'s retry with the splices withdrawn).
+lower re-ranks at its own forks and, once no row of it binds, retires the one cut that minted it (`Pipeline.run`'s
+retry).
 
 Env pins sit ABOVE the whole list: a hand pin (`--ab`, `EMMY_KNOBS`, `EMMY_<KNOB>`) settles the pinned families before
 any fork reaches a decide. That is how a row is MEASURED — `run --golden PATH --bench` pins each golden row and each
@@ -818,10 +819,9 @@ sum-of-predictions comparison would be exposed to the model's absolute-µs error
 different kernel families, and that is a fitting requirement on the prior. When a splice cannot be priced at all,
 the pricing decides nothing and every leaf — cuts included — goes on to the ordinary leaf ranking
 (`_priced_pick`, the flat-list form kept for exactly these corners). **No leaf is
-withheld to keep a kernel set unchanged.** The one thing that does withdraw the splices is `price_structural=False`,
-which is not about speed: it is how `GreedyStrategy` retires a structural pick once no row of a fragment kernel binds
-(a fragment's failure cannot be blocklisted at the structural fork site), and how a nested price probe avoids
-re-splitting the slice it is pricing.
+withheld to keep a kernel set unchanged.** The one thing that does withdraw every splice is `price_structural=False`,
+which is not about speed: it is how a nested price probe avoids re-splitting the slice it is pricing. A retired cut
+withdraws ONE splice — the blocklisted decision identity at that node — and the fork re-prices over what remains.
 
 **Evidence joins tolerate stamps a row predates, and nothing else.** `Prior.sig_groups` is one contract for the
 reservoir, the evidence index (tune DB rows and golden rows alike) and the disqualification tier: a row describes a
@@ -838,21 +838,28 @@ matching measured rows.
 
 **Retries are decide-wrappers over a deterministic re-resolve** — every other choice replays identically (cheap
 non-chronological backtracking, no snapshots). A fragment kernel's refused row blocklists at that piece's own schedule
-fork, so the composed route replays while the piece re-ranks; only once no row of it binds are structural picks retired.
+fork, so the composed route replays while the piece re-ranks, across as many retries as the piece has rows. Only once
+no row of it binds is a structural pick retired, and only one: the cut that minted the piece (the trace's `Decision`
+records the ids a splice minted), blocklisted by its decision identity at its own fork, where the decide withdraws
+that splice and re-prices the fork over the remaining arms with the same evidence — so a disqualified fused side keeps
+losing to a finite arm, and the fused root returns only when every cut above the piece has been retired in turn. The
+retirement is logged at WARNING with the rejection reason.
 
 **Greedy validity fallback.** The whole greedy retry orchestration is search policy, owned by
 `policy/greedy.GreedyStrategy` — `Pipeline.run` is a thin entry point delegating to it. The prior ranks by
 predicted latency, which can rank a tile that fails `validate(ctx)` (smem / thread budget) first — `tune`
 benches-and-skips it, but greedy benches nothing. So when a deterministic compile leaves a node un-lowered, the
-strategy blocklists that tile's `tile_identity` (its planner knobs) and re-resolves: `greedy_decide(blocked=…)`
-drops the matching leaf and picks the next-best. This is bounded by `_MAX_GREEDY_RETRIES`.
+strategy blocklists the `tile_identity` of the pick the resolve made at that node — read off the trace, never off
+the terminal node's own knob row, which a kernel-stage pass can stamp with a policy knob (`LOOPIFY`) no schedule
+leaf spells — and re-resolves: `greedy_decide(blocked=…)` drops the matching leaf and picks the next-best. This is
+bounded by `_MAX_GREEDY_RETRIES`.
 When the retry budget exhausts with the node still un-lowered (an *online* prior can rank many over-budget tiles above
 the first in-budget one), the strategy takes one last **emission-order resolve**
 (`greedy_decide(blocked=…, prior=None)`): its point is that it ignores the prior whose extrapolation caused the
 overflow, and the blocklist rides along so this last resolve can never re-pick a tile that already
-failed `validate(ctx)`. It is a validity fallback, not a quality one — it makes no claim about the speed of what it
-lands on, and the enumeration promises it no particular leaf. When that leaf overflows too, `_raise_on_unlowered`
-fires the loud `LoweringError`.
+failed `validate(ctx)`; the measured arms still decide the kernel-set forks they spell. It is a validity fallback,
+not a quality one — it makes no claim about the speed of what it lands on, and the enumeration promises it no
+particular leaf. When that leaf overflows too, `_raise_on_unlowered` fires the loud `LoweringError`.
 
 ### `Pipeline.tune_async` — the autotune sweep
 

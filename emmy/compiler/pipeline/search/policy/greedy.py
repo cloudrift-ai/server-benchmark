@@ -88,13 +88,14 @@ def _tile_pipeline():
 
 
 def tile_identity(knobs: dict) -> frozenset:
-    """The blocklist key for a tile — its canonical tuning-knob view
+    """The blocklist key for a pick — its canonical tuning-knob view
     (:func:`~emmy.compiler.pipeline.knob.tuning_knob_items`: the ``S_*`` / ``H_*``
     features and marker booleans dropped, values stringified) as a hashable set.
-    Computed identically for a greedy leaf's fork knobs and for a rejected node's
-    realized knobs — the honest-stamping rule makes the two agree — so
-    :func:`greedy_decide` can skip a leaf that already failed ``validate(ctx)``
-    downstream (the smem / thread-budget gate)."""
+    Computed identically for a greedy leaf's fork knobs (or a splice's decision knobs) and
+    for the trace entry of the pick a retry blocklists — the same dict, read at the fork and
+    recorded by the resolve — so :func:`greedy_decide` can skip a leaf that already failed
+    ``validate(ctx)`` downstream (the smem / thread-budget gate). The terminal node's own knob
+    row is NOT that key: a kernel-stage pass can stamp it with a policy knob no leaf spells."""
     from emmy.compiler.pipeline.knob import tuning_knob_items  # noqa: PLC0415
 
     return frozenset(tuning_knob_items(knobs))

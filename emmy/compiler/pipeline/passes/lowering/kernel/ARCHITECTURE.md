@@ -113,7 +113,9 @@ lift. An output sweep whose axis the peeled root's cone reads cannot wrap at the
 projection, so no wrap position encloses it): the serial fold binds the projection UNPEELED so the sweep loop wraps
 operand and projection together, and a cooperative / ILP row — whose lanes the sweep would be distributed across —
 declines via `UnbindableProjection` (`RuleSkipped(reject=True)` at the pass boundary; the greedy retries the next
-row). The
+row). The other `UnbindableProjection` — a multi-root binding of a projection whose outputs do not partition by root
+(`ops.projection_regions`) — is a term fact the schedule context reads at the offer, so no enumerated row tiles a
+second root there and the decline is a bug, not a retry. The
 recursion, the binder, the reduce-axis tiling, and the shared-row staging apply live in `_factor.py`; the four tiling
 levels every tier seals through are `_tiling.py`, which knows a `Side` pair, integer counts and three callables — no
 node kinds, no algebra, no `Ctx`. That is the decide/realize seam: the tile schedule picks the plan, `_tiling` is

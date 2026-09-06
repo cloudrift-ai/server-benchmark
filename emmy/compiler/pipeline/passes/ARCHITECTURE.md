@@ -74,46 +74,7 @@ post-decomposition Python source file for known format names.
 
 ## The tile scheduler: one stored tree
 
-`020_twisted` first applies the general exp-family Fold rewrite described at the boundary below.
-
-`035_block` splits a twisted carrier's stream into blocks. It is a NORMALIZATION, not a decision:
-the rewrite is parameter-free (the width is read off the stream's own extent) and idempotent (every
-axis it installs carries a `Window` receipt), so it opens no fork, adds no schedule family and no
-key to any row, and leaves one identity per term. The outer axis walks the stream's extent in
-strides (`Axis.step`) and each inner binder's extent IS the block, so the σ that reads the absolute
-coordinate stays `k_o + k_i` and no width enters the index arithmetic; `lower` renders the outer as
-the `StridedLoop` that already says exactly this.
-
-Only a TWISTED carrier is blocked, because it is the only carrier a block gives anything, and only
-when a channel comes out of it BILINEAR. A contraction's block is already spelled: `bk` says how
-many atom K-steps one inner step consumes, so re-associating the term would restate that field as a
-shape. A plain reduction's partition is `REDUCE`'s, and the cross-CTA split already factors its
-axis. A twisted carrier is different in kind — its ⊕ is a rescaling program, so `as_contraction`
-refuses at its first gate and NO site inside it is bilinear. Blocking separates the two monoids (the
-twisted ⊕ stays on the outer fold, the inner level runs the base monoid over a per-block
-contribution) and CREATES a site whose contribution is a product of two distinct cones. That is
-FlashAttention-2's shape, derived rather than recognized: the per-step rescale coefficient is read
-out of the stored combine and the value it multiplies is the fold's own lift result, so no recipe is
-consulted and no operation family is matched. A plain online softmax is declined by the same
-reading — its channels are sums of the weight itself, and a block would buy it a second pass over
-the stream for nothing.
-
-It runs AFTER `030_cut` because a piece the cut mints is a different carrier from the one it came
-out of: attention cut at its value channel leaves a statistics piece whose channels are sums of the
-weight, and blocking ahead of the fork handed that piece a block it paid a second pass over the
-stream for — 18.8 ms on a 512-key head where the fused kernel is 128 µs. Each branch now blocks
-what its own term deserves. A block is still a working set INSIDE one kernel, so no seam evaluated
-over a block coordinate is cuttable either: the piece's whole output would be one block.
-
-The WIDTH is the form's: `block_width` is the largest power-of-two fraction of the extent within
-`MAX_BLOCK`, and a stream no wider than one block, or one a whole number of blocks does not fit, is
-not blocked at all. The row then chunks the block with its own `bk` exactly as it chunks any other
-K. Two equations follow, and the projection offers only the tiles that satisfy them: the channel's
-K-step consumes the block in ONE trip, and the score's fragment grid covers it in one cover. Both
-are the kernel binder's own, so reading them at enumeration is what keeps a row the binder must
-refuse from ever being offered.
-
-The single `030_cut`
+`020_twisted` first applies the general exp-family Fold rewrite described at the boundary below. The single `030_cut`
 pass runs to a fixpoint over two ordered domains. It first offers the maximal fused tree beside every semantically
 closed stored Fold-edge cut whose workspace dtypes are determined (an undeterminable seam is not offered — the offer
 and realization must agree). Once placement is consumed, it offers the unsplit tree beside every cross-CTA reduce

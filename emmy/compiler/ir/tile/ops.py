@@ -299,9 +299,7 @@ class Sched:
           result tiles the placement's trailing free pair;
         - any other nested contraction takes the free m axis and its nearest ENCLOSING fold's axis as n —
           read through a slice partial's window PARENT, so the view carries the pre-slice geometry
-          the fragment clamps were built against. A BLOCK window is the exception, and the reason
-          blocking exists: the enclosing fold walks one block at a time, so the block's OWN extent
-          is the n the fragment is sized against, not the stream it was carved from.
+          the fragment clamps were built against.
         """
         free = tuple(self.place.free)
         site = self.site_of(node)
@@ -329,8 +327,8 @@ class Sched:
         if len(free) < 2:
             return None
         # The nearest ENCLOSING fold, through any zero-axis projection between them — a projection
-        # binds no coordinate, so it cannot be the one the result is evaluated over. A blocked
-        # carrier's weight cone reaches its score through exactly one such level.
+        # binds no coordinate, so it cannot be the one the result is evaluated over. A weight cone
+        # reaches the score it is built over through exactly one such level.
         parent = next(
             (
                 found
@@ -343,7 +341,7 @@ class Sched:
         ax = self.axis_of(parent.node.axis) if parent is not None else None
         if ax is None:
             return None
-        return orient((free[-2], ax.window.parent if ax.window is not None and not ax.window.block else ax))
+        return orient((free[-2], ax.window.parent if ax.window is not None else ax))
 
 
 def sched_of(tile) -> Sched:

@@ -96,10 +96,7 @@ def _reduction_domain(tile: TileOp, node) -> tuple[Reduce, ...]:
         return (Reduce(),)  # the binder partitions the roots it peels and their chain members; any other reduce lowers serially
     if {axis.name for spec in tile.output_specs for axis in spec.sweep} & node.free_axes:
         return (Reduce(),)
-    # ``coop-t`` sweeps the OUTPUT axis so B loads coalesce at every k step, which a STRIDED
-    # reduce axis has no reading of: its k steps are blocks, and one lane per output column would
-    # sweep a block rather than an element. The other bands ride :attr:`Axis.trips` and do.
-    transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node) and tile.axis_of(node.axis).step is None
+    transposed_ok = _transposed_reduction_ok(tile) and is_root and not chain_form(node)
     return (
         Reduce(),
         *(choice for choice in coop_reduce_moves() if not choice.coop_transposed or (choice.coop % WARP_LANES == 0 and transposed_ok)),
@@ -264,10 +261,8 @@ def _contraction_domain(
     """Project one contraction's locally realizable scalar and tensor-core choices."""
     per_cell_reductions = _reduction_domain(tile, node) if facts.k_axis.extent.is_static else (Reduce(),)
     allowed_atoms = _warp_atoms(tile, target, node)
-    # A BLOCKED site's K is the block, and the block is whatever this tile's K-step turns out to
-    # be — the two are one quantity, so nothing narrows the other and ``bk`` ranges freely here.
     wide_warp_tiles = tuple(
-        plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2)) is None
+        plan for name in allowed_atoms if _kstep_refusal(facts.k_axis, (plan := Tile(atom=ATOM_REGISTRY[name], regs=(26, 4), bk=2))) is None
     )
     scalar_tiles = scalar_tile_moves() if len(node.operands) == 2 else (Tile(),)
     catalog = (
@@ -324,61 +319,10 @@ def _options(state: _ProjectionState, node) -> tuple:
             and _plan_node_refusal(state.tile, node, choice.tile, geometry, facts) is not None
         ):
             continue
-        valid_choices.append((choice, geometry))
-    # A site INSIDE a block exists to be bilinear. The block was cut so a channel could reach the
-    # tensor cores, and it costs a second pass over the stream to do it — a scalar row there pays
-    # that and buys nothing. So the scalar tier is offered only where no warp tile fits the block
-    # at all, and a warp tile that does not consume the block EXACTLY is not offered: the block is
-    # one step of the stream, and a row that half-covers it emits a different blocking from the
-    # one the term spells. This is blocking's own reading, applied to the sites it created.
-    if any(_block_of(state.tile, node, geometry) is not None for _, geometry in valid_choices):
-        fitting = [
-            choice
-            for choice, geometry in valid_choices
-            if choice.tile.is_warp and not _block_refusal(state.tile, node, choice.tile, geometry)
-        ]
-        valid_choices = fitting or [choice for choice, _ in valid_choices]
-    else:
-        valid_choices = [choice for choice, _ in valid_choices]
+        valid_choices.append(choice)
     if not valid_choices:
         raise ClassicProjectionError(f"classic site {node_id_spelling(site)} has no locally supported choice")
     return tuple(valid_choices)
-
-
-def _block_extent(tile: TileOp, name: str | None) -> int | None:
-    """The block ``name`` walks, when it is a block's INNER axis — the one blocking cut the stream
-    into. The outer axis strides and is not one."""
-    if name is None:
-        return None
-    axis = tile.axis_of(name)
-    window = axis.window
-    return axis.extent.as_static() if window is not None and window.block and axis.step is None else None
-
-
-def _block_of(tile: TileOp, node, geometry) -> int | None:
-    """The block one site's tile has to consume, or ``None`` when the site is not inside a block.
-
-    Two sites sit inside one: the CHANNEL, whose K IS the block; and the SCORE the weight reads,
-    whose output covers the block.
-    """
-    block = _block_extent(tile, node.axis)
-    if block is not None:
-        return block
-    return _block_extent(tile, geometry.axes[1].name if isinstance(geometry, PlacedTile) else None)
-
-
-def _block_refusal(tile: TileOp, node, plan: Tile, geometry) -> bool:
-    """Whether one warp tile inside a block fails to consume exactly that block — the channel's
-    K-step in ONE trip, the score's fragment grid in one cover.
-
-    Both equations are the emitter's own (a fragment grid that does not cover the chunk it stores
-    has no seam), and reading them here is what keeps the enumeration from offering rows the kernel
-    binder must then refuse.
-    """
-    if _block_extent(tile, node.axis) is not None:
-        return plan.atom.atom_k * plan.bk != _block_extent(tile, node.axis)
-    block = _block_of(tile, node, geometry)
-    return block is not None and plan.regs[1] * plan.atom.atom_n != block
 
 
 def _edge_domain(state: _ProjectionState, site: int, choices: tuple) -> tuple[EdgeSchedule, ...]:

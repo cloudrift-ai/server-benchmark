@@ -1,8 +1,6 @@
 # evidence: Qwen3 target k_sdpa_mean_reduce_29d3df.171afed452e2.s512 dropped the same
 # Fold.combine=None statistic at materialization on sm_70, sm_89 and sm_120. This reduced GQA
-# slice preserves the zero-axis prologue whose first top-level reduce Loop is authored in its body. The row is the
-# site-keyed spelling of the same schedule after blocking split the carrier: the statistic fill it exists for is
-# STAGE@map.1/twist.1/reduce.1/inner, where the bare STAGE used to reach it.
+# slice preserves the zero-axis prologue whose first top-level reduce Loop is authored in its body.
 compute_cap:
 - 8
 - 0
@@ -52,35 +50,11 @@ configs:
     bindings: {}
     pins:
       FAST_MATH: true
-    knobs:
       PLACE: fuse
-    identity: c0c2af1195acd28c8b1f4995bb4fdf51cf10664e358dd3bb9b3f2a346a94c749
-  - name: k_sdpa_rms_norm_reduce_baf6b4.e43185b73196.666d306acaab
-    bindings: {}
-    pins:
-      FAST_MATH: true
-    knobs: {}
-    identity: 666d306acaabce9ac3cfdf4243aeaab39d2528d142fd4972a1dbad3f164a7a82
-  - name: k_sdpa_rms_norm_reduce_baf6b4.e43185b73196.b250c2f226ea
-    bindings: {}
-    pins:
-      FAST_MATH: true
     knobs:
-      TILE@map.1/twist.1/reduce.1/inner: mma_m16n8k16_f16_f32/f1x8
-      TILE@map.1/twist.2/inner: mma_m16n8k16_f16_f32/f1x1/k4
-      TILE@map.1/twist.2/inner.1/map.1/inner: mma_m16n8k16_f16_f32/f1x8
-      REDUCE@map.1/twist: ''
-      REDUCE@map.1/twist.1/reduce: ''
-      REDUCE@map.1/twist.1/reduce.1/inner: ''
-      REDUCE@map.1/twist.1/reduce.1/inner.1/map.3/map.1/reduce: ''
-      REDUCE@map.1/twist.1/reduce.1/inner.2/map.3/map.1/reduce: ''
-      REDUCE@map.1/twist.2/inner: ''
-      REDUCE@map.1/twist.2/inner.1/map.1/inner: ''
-      REDUCE@map.1/twist.2/inner.1/map.1/inner.2/map.3/map.1/reduce: ''
-      REDUCE@map.1/twist.3/reduce: ''
-      STAGE@map.1/twist.1/reduce.1/inner: d1/smem
-      STAGE@map.1/twist.2/inner: d1/smem
-      STAGE@map.1/twist.2/inner.1/map.1/inner: d1/smem
       WORK: w1x1
       RASTER: ''
-    identity: b250c2f226ea5ead82b679995d9bd8d30e76b259cdf4c850ae1d615cb68ddf99
+      TILE: mma_m16n8k16_f16_f32/f1x1
+      REDUCE: ''
+      STAGE: d1/smem
+    identity: c0c2af1195acd28c8b1f4995bb4fdf51cf10664e358dd3bb9b3f2a346a94c749

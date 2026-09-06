@@ -9231,12 +9231,12 @@ loops:
           fields:
             axis:
               class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null, step: null}
+              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -9258,17 +9258,17 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 16}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 16}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -9330,7 +9330,7 @@ loops:
                       fields: {name: v13, op: {elementwise: rsqrt}, args: {tuple: [v12]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -9391,17 +9391,17 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a6, extent: {dim: 16}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a6, extent: {dim: 16}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -9469,7 +9469,7 @@ loops:
                       fields: {name: v25, op: {elementwise: rsqrt}, args: {tuple: [v24]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a8, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a8, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -9705,12 +9705,12 @@ loops:
           fields:
             axis:
               class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null, step: null}
+              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -9721,7 +9721,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -9757,7 +9757,7 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -9768,7 +9768,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -9793,12 +9793,12 @@ loops:
                       fields: {name: v8, op: {elementwise: add}, args: {tuple: [acc2, in6]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -9809,7 +9809,7 @@ loops:
                                     dtype: null
                                 - class: Loop
                                   fields:
-                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null, step: null}}
+                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
                                     body:
                                       body:
                                       - class: Load
@@ -10149,12 +10149,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -10176,17 +10176,17 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 2}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 2}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 16}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 16}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -10244,12 +10244,12 @@ loops:
                       fields: {name: v13, op: {elementwise: rsqrt}, args: {tuple: [v12]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 16}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 16}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -10320,17 +10320,17 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 4}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 4}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a7, extent: {dim: 16}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a7, extent: {dim: 16}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a8, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a8, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -10394,12 +10394,12 @@ loops:
                       fields: {name: v25, op: {elementwise: rsqrt}, args: {tuple: [v24]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 16}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 16}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a9, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a9, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -10470,12 +10470,12 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a10, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a10, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -10668,12 +10668,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -10684,7 +10684,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -10720,7 +10720,7 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -10731,7 +10731,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -10756,12 +10756,12 @@ loops:
                       fields: {name: v8, op: {elementwise: add}, args: {tuple: [acc2, in6]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -10772,7 +10772,7 @@ loops:
                                     dtype: null
                                 - class: Loop
                                   fields:
-                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null, step: null}}
+                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
                                     body:
                                       body:
                                       - class: Load
@@ -11070,7 +11070,7 @@ loops:
         body:
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Load
@@ -11132,17 +11132,17 @@ loops:
         - {class: Assign, fields: {name: v5, op: {elementwise: rsqrt}, args: {tuple: [v4]}, dtype: null}}
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a1, extent: {dim: 2}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a1, extent: {dim: 2}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 16}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 16}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -11194,12 +11194,12 @@ loops:
                 fields: {name: v12, op: {elementwise: rsqrt}, args: {tuple: [v11]}, dtype: null}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a4, extent: {dim: 16}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a4, extent: {dim: 16}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -11270,17 +11270,17 @@ loops:
             seed: true
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a1, extent: {dim: 4}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a1, extent: {dim: 4}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a6, extent: {dim: 16}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a6, extent: {dim: 16}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -11344,12 +11344,12 @@ loops:
                 fields: {name: v24, op: {elementwise: rsqrt}, args: {tuple: [v23]}, dtype: null}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a4, extent: {dim: 16}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a4, extent: {dim: 16}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a8, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a8, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -11420,12 +11420,12 @@ loops:
             seed: true
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a9, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a9, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -11602,7 +11602,7 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Load
@@ -11613,7 +11613,7 @@ loops:
                   dtype: null
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -11661,7 +11661,7 @@ loops:
         - {class: Assign, fields: {name: v5, op: {elementwise: rsqrt}, args: {tuple: [v4]}, dtype: null}}
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Load
@@ -11672,7 +11672,7 @@ loops:
                   dtype: null
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -11697,12 +11697,12 @@ loops:
                 fields: {name: v7, op: {elementwise: add}, args: {tuple: [acc2, in6]}, dtype: null}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a4, extent: {dim: 128}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a4, extent: {dim: 128}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -11713,7 +11713,7 @@ loops:
                               dtype: null
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -11893,22 +11893,22 @@ loops:
           fields:
             axis:
               class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null, step: null}
+              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -12039,22 +12039,22 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -12185,17 +12185,17 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -12324,22 +12324,22 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 256}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 256}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -12626,12 +12626,12 @@ loops:
           fields:
             axis:
               class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null, step: null}
+              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -12653,12 +12653,12 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -12703,12 +12703,12 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -12771,12 +12771,12 @@ loops:
                 fields: {name: v20, op: {elementwise: rsqrt}, args: {tuple: [v18]}, dtype: null}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -12982,12 +12982,12 @@ loops:
           fields:
             axis:
               class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null, step: null}
+              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -12998,7 +12998,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -13034,7 +13034,7 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -13051,7 +13051,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -13312,12 +13312,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -13339,12 +13339,12 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -13389,12 +13389,12 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -13457,12 +13457,12 @@ loops:
                 fields: {name: v20, op: {elementwise: rsqrt}, args: {tuple: [v18]}, dtype: null}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -13665,12 +13665,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -13681,7 +13681,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -13717,7 +13717,7 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -13734,7 +13734,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -13953,7 +13953,7 @@ loops:
         body:
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Load
@@ -14011,12 +14011,12 @@ loops:
         - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -14055,12 +14055,12 @@ loops:
             seed: true
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -14123,12 +14123,12 @@ loops:
           fields: {name: v17, op: {elementwise: rsqrt}, args: {tuple: [v15]}, dtype: null}
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -14321,7 +14321,7 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Load
@@ -14332,7 +14332,7 @@ loops:
                   dtype: null
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -14374,7 +14374,7 @@ loops:
         - {class: Assign, fields: {name: v5, op: {elementwise: rsqrt}, args: {tuple: [v4]}, dtype: null}}
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Load
@@ -14391,7 +14391,7 @@ loops:
                   dtype: null
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -14496,22 +14496,22 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -14796,12 +14796,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -14823,12 +14823,12 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -14873,12 +14873,12 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -14941,12 +14941,12 @@ loops:
                 fields: {name: v20, op: {elementwise: rsqrt}, args: {tuple: [v18]}, dtype: null}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -15149,12 +15149,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -15165,7 +15165,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -15201,7 +15201,7 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -15218,7 +15218,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -15327,22 +15327,22 @@ loops:
           fields:
             axis:
               class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null, step: null}
+              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 48}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 48}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -15473,22 +15473,22 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 8}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 48}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 48}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -15619,17 +15619,17 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 48}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 48}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -15758,22 +15758,22 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 256}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 256}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 48}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 48}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -15904,22 +15904,22 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -16204,12 +16204,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -16231,12 +16231,12 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -16281,12 +16281,12 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -16349,12 +16349,12 @@ loops:
                 fields: {name: v20, op: {elementwise: rsqrt}, args: {tuple: [v18]}, dtype: null}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -16557,12 +16557,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 4}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -16573,7 +16573,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -16609,7 +16609,7 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -16626,7 +16626,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -16783,12 +16783,12 @@ loops:
           fields:
             axis:
               class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null, step: null}
+              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -16810,12 +16810,12 @@ loops:
               - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -16886,12 +16886,12 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -17049,12 +17049,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 16}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -17076,12 +17076,12 @@ loops:
               - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -17152,12 +17152,12 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -17300,7 +17300,7 @@ loops:
         body:
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Load
@@ -17334,12 +17334,12 @@ loops:
         - {class: Assign, fields: {name: v3, op: {elementwise: rsqrt}, args: {tuple: [v2]}, dtype: null}}
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a1, extent: {dim: 32}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -17404,12 +17404,12 @@ loops:
             seed: true
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -17564,12 +17564,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -17591,12 +17591,12 @@ loops:
               - {class: Assign, fields: {name: v4, op: {elementwise: rsqrt}, args: {tuple: [v3]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 32}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -17667,12 +17667,12 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -17864,12 +17864,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 32}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -17880,7 +17880,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -17916,7 +17916,7 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -17927,7 +17927,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -17952,12 +17952,12 @@ loops:
                       fields: {name: v8, op: {elementwise: add}, args: {tuple: [acc2, in6]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Load
@@ -17968,7 +17968,7 @@ loops:
                                     dtype: null
                                 - class: Loop
                                   fields:
-                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null, step: null}}
+                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
                                     body:
                                       body:
                                       - class: Load
@@ -18308,12 +18308,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -18335,12 +18335,12 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -18385,12 +18385,12 @@ loops:
                   seed: true
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -18453,12 +18453,12 @@ loops:
                 fields: {name: v20, op: {elementwise: rsqrt}, args: {tuple: [v18]}, dtype: null}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -18661,12 +18661,12 @@ loops:
             dtype: null
         - class: Loop
           fields:
-            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null, step: null}}
+            axis: {class: Axis, fields: {name: a0, extent: {dim: 512}, window: null}}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -18677,7 +18677,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -18713,7 +18713,7 @@ loops:
               - {class: Assign, fields: {name: v6, op: {elementwise: rsqrt}, args: {tuple: [v5]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Load
@@ -18730,7 +18730,7 @@ loops:
                         dtype: null
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -19238,17 +19238,17 @@ loops:
           fields:
             axis:
               class: Axis
-              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null, step: null}
+              fields: {name: a0, extent: {dim: {sym: num_tokens, hint: 512}}, window: null}
             body:
               body:
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a2, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -19282,12 +19282,12 @@ loops:
               - {class: Assign, fields: {name: v7, op: {elementwise: rsqrt}, args: {tuple: [v6]}, dtype: null}}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a1, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a3, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -19342,22 +19342,22 @@ loops:
                 fields: {name: v15, op: {elementwise: rsqrt}, args: {tuple: [v14]}, dtype: null}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a4, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a5, extent: {dim: 128}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a6, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Loop
                                   fields:
-                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null, step: null}}
+                                    axis: {class: Axis, fields: {name: a7, extent: {dim: 64}, window: null}}
                                     body:
                                       body:
                                       - class: Load
@@ -19515,12 +19515,12 @@ loops:
                 fields: {name: v44, op: {elementwise: rsqrt}, args: {tuple: [v43]}, dtype: null}
               - class: Loop
                 fields:
-                  axis: {class: Axis, fields: {name: a8, extent: {dim: 64}, window: null, step: null}}
+                  axis: {class: Axis, fields: {name: a8, extent: {dim: 64}, window: null}}
                   body:
                     body:
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a9, extent: {dim: 64}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a9, extent: {dim: 64}, window: null}}
                         body:
                           body:
                           - class: Load
@@ -19553,17 +19553,17 @@ loops:
                       fields: {names: {tuple: [in26]}, input: add_1, index: {tuple: [{expr: {var: a8}}]}, dtype: null}
                     - class: Loop
                       fields:
-                        axis: {class: Axis, fields: {name: a10, extent: {dim: 128}, window: null, step: null}}
+                        axis: {class: Axis, fields: {name: a10, extent: {dim: 128}, window: null}}
                         body:
                           body:
                           - class: Loop
                             fields:
-                              axis: {class: Axis, fields: {name: a11, extent: {dim: 64}, window: null, step: null}}
+                              axis: {class: Axis, fields: {name: a11, extent: {dim: 64}, window: null}}
                               body:
                                 body:
                                 - class: Loop
                                   fields:
-                                    axis: {class: Axis, fields: {name: a12, extent: {dim: 64}, window: null, step: null}}
+                                    axis: {class: Axis, fields: {name: a12, extent: {dim: 64}, window: null}}
                                     body:
                                       body:
                                       - class: Load

@@ -27,7 +27,7 @@ from functools import cached_property
 
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
-from emmy.compiler.ir.expr import Literal, Var
+from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.lam import Lambda
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, OutputSpec, Stmt, StridedLoop
@@ -849,14 +849,14 @@ class Fold:
             target = stmts if stmts is not None else sink(node)
             if term.axis not in coordinates:
                 raise ValueError(f"lower: no extent for reduce axis {term.axis!r} — the kernel's axis table names it")
-            target.append(_loop(coordinates[term.axis], _scope(inner)))
+            target.append(Loop(axis=coordinates[term.axis], body=_scope(inner)))
             attach(term, "state", target, node, scope)
 
         def assemble(path: tuple[str, ...]) -> Body:
             body = list(nest[path])
             for name in opened[opened.index(path[-1]) + 1 :] if path else opened:
                 if (*path, name) in nest:
-                    body.append(_loop(coordinates[name], assemble((*path, name))))
+                    body.append(Loop(axis=coordinates[name], body=assemble((*path, name))))
             return _scope(body)
 
         place(self, [], None)
@@ -869,8 +869,7 @@ def _scope(stmts) -> Body:
 
     The dedup is the shared-term rule. The FUSE is the same rule a level up: two loops over one
     axis where neither reads what the other defines are two passes over one stream, and their
-    union is one pass — which is what puts a blocked carrier's expectation and its denominator in
-    one loop, computing the weight they both read once. A loop that DOES read the loop above it (a
+    union is one pass, computing what they both read once. A loop that DOES read the loop above it (a
     statistic's pass, then the pass that normalizes by it) reads a FINISHED accumulator, and
     iterating together would hand it the in-flight one; that pair stays two loops.
     """
@@ -889,17 +888,6 @@ def _scope(stmts) -> Body:
             out.pop()
         out.append(stmt)
     return Body(tuple(out))
-
-
-def _loop(axis: Axis, body: Body) -> Stmt:
-    """The iteration statement one coordinate renders as — strided when its axis strides.
-
-    A blocked stream's outer axis walks its parent in blocks, so the size lives on the axis and
-    never in the body's index arithmetic; ``StridedLoop`` is the statement that already says that.
-    """
-    if axis.step is None:
-        return Loop(axis=axis, body=body)
-    return StridedLoop(axis=axis, start=Literal(0, "int"), step=axis.step, body=body)
 
 
 @_rewrite_kind.register

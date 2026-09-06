@@ -265,7 +265,7 @@ def _slice_fold(fold: Fold, axis: Axis, b: int, split: Axis) -> tuple[Axis, Fold
     # own binder (same name, sliced extent) while its operands' coordinates take the σ-offset. A
     # blanket σ would be refused as capture — this fold BINDS the name σ maps — and rightly so;
     # what changes here is the axis itself, which only the caller can say.
-    operands = tuple(sliced_edge(edge, sigma, axis.name, sliced_axis, split) for edge in fold.operands)
+    operands = tuple(_sliced_edge(edge, sigma, axis.name, sliced_axis, split) for edge in fold.operands)
     body = Body(tuple(stmt.substitute(sigma) for stmt in fold.lift.body))
     return sliced_axis, replace(fold, operands=operands, lift=replace(fold.lift, body=body))
 
@@ -285,7 +285,7 @@ def _factor_k(k_axis: Axis, w: int) -> tuple[Axis, Axis, Sigma]:
     return ksplit, kslice, sigma
 
 
-def sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | None = None):
+def _sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | None = None):
     """An operand edge σ-reindexed to absolute k for a split partition — the SAME rule on either
     edge. A MATERIALIZED edge rewrites its gmem index; a COMPUTED cone rewrites its per-cell BODY
     and every K-VARYING producer edge it composes (attention's per-cell score contraction — the
@@ -304,17 +304,10 @@ def sliced_edge(edge, sigma: Sigma, k_name: str, kslice=None, ksplit: Axis | Non
         mapped = sigma.get(name)
         return (name,) if mapped is None else tuple(dict.fromkeys(mapped.free_vars()))
 
-    ops = tuple(sliced_edge(e, sigma, k_name, kslice, ksplit) if k_name in e.free_axes else e for e in edge.operands)
+    ops = tuple(_sliced_edge(e, sigma, k_name, kslice, ksplit) if k_name in e.free_axes else e for e in edge.operands)
     body = Body(tuple(s.substitute(sigma) for s in edge.lift.body))
     params = tuple(dict.fromkeys(name for param in edge.lift.params for name in images(param)))
     return replace(edge, operands=ops, lift=replace(edge.lift, params=params, body=body))
-
-
-#: The widest block a stream is cut into. A block is a WORKING SET: the pivot's pass has to reach
-#: the end of it before the channels may start, so every value the channels then read against that
-#: pivot is still in registers when they do — which is what bounds it. 64 is the widest column
-#: grid the warp catalog covers a contraction's output with (eight register columns of an
-#: eight-wide atom), and a block no fragment grid covers is a block no tensor core can take.
 
 
 def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, Fold]:
@@ -327,7 +320,7 @@ def _sliced_contraction(node: Fold, k_axis: Axis, w: int) -> tuple[Axis, Axis, F
     # Rebuilt DIRECTLY over the σ-reindexed operands, in stored order: the slice is the same term
     # with a narrower axis, so its lift, monoid and seeds are the node's own — there is nothing for
     # a former to re-derive, and no role to re-name.
-    operands = tuple(sliced_edge(edge, sigma, node.axis, kslice, ksplit) for edge in node.operands)
+    operands = tuple(_sliced_edge(edge, sigma, node.axis, kslice, ksplit) for edge in node.operands)
     return ksplit, kslice, replace(node, operands=operands)
 
 

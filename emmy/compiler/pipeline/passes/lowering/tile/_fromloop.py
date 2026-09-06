@@ -434,40 +434,6 @@ def lift_body(body, axes: tuple = (), levels: tuple = ()) -> tuple[tuple, Body]:
     return remaining, Body(kept)
 
 
-def _combine_from_merge(body: Body, accums: tuple[Accum, ...], temps: frozenset[int]) -> tuple[Lambda, tuple[str, ...]]:
-    """The stored ⊕ recovered from the statements ``Fold.merge`` emitted, and the injection it
-    folds — the inverse of that method.
-
-    A merge lowers every rescale temp to an ordinary statement and each state component to an
-    ``Accum`` reading it (``name = op(base, value)``, ``base`` absent for the ordinary self-fold).
-    Read back, those statements ARE the combine: the temps verbatim and each ``Accum`` as the
-    assignment it folds, in original program order — a combine is not SSA in its states, so a temp
-    standing between two component updates reads whichever value is current there.
-
-    The injection is what the combine reads and does not itself define. It is NOT the ``Accum``'s
-    ``value``: a twisted merge rescales the incoming side first, so that operand names the rescale
-    (``acc__blk · β``), not the component. Returned in first-read order and bound as the combine's
-    second operand positionally, which is the contract ``Fold.merge`` re-applies at ``lift.results``.
-    """
-    states = tuple(stmt.name for stmt in accums)
-    own = {id(stmt) for stmt in accums} | temps
-    defined = {name for stmt in body if id(stmt) in own for name in stmt.defines()}
-    stmts: list[Stmt] = []
-    other: list[str] = []
-    for stmt in body:
-        if id(stmt) not in own:
-            continue
-        for name in Body((stmt,)).ssa_uses:
-            if name not in defined and name not in other:
-                other.append(name)
-        if isinstance(stmt, Accum):
-            left = stmt.name if stmt.base is None else stmt.base
-            stmts.append(Assign(name=stmt.name, op=stmt.op, args=(left, stmt.value)))
-        else:
-            stmts.append(stmt)
-    return Lambda(params=(*states, *other), body=Body(tuple(stmts)), results=states), tuple(other)
-
-
 def fold_from_loop(loop: Loop) -> Fold:
     """Lift one PURE reduction from its explicit ``Accum`` statements."""
     fold, trailing = scan_from_loop(loop)
@@ -489,26 +455,14 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     accums = tuple(stmt for stmt in body if isinstance(stmt, Accum))
     if not accums:
         raise ValueError(f"reduce loop {loop.axis.name!r} has no Accum")
-    if any(stmt.dtype is not None for stmt in accums):
+    if any(stmt.base is not None or stmt.dtype is not None for stmt in accums):
         raise ValueError(f"reduce loop {loop.axis.name!r} is not in canonical Loop IR")
     writes = tuple(stmt for stmt in body if isinstance(stmt, Write))
     write_ids = {id(stmt) for stmt in writes}
-    # A TWISTED carrier's rescale reads the carried state, so those statements are the COMBINE's,
-    # not the lift's — the one discrimination that tells the two halves of a merge apart. Program
-    # order plus SSA makes a single forward pass the whole closure.
-    carried = {stmt.name for stmt in accums}
-    combine_temps: set[int] = set()
-    for stmt in body:
-        if isinstance(stmt, Accum) or id(stmt) in write_ids or not (Body((stmt,)).ssa_uses & carried):
-            continue
-        carried |= set(stmt.defines())
-        combine_temps.add(id(stmt))
-    if any(id(stmt) in combine_temps for stmt in body if isinstance(stmt, Load)):
-        raise ValueError(f"reduce loop {loop.axis.name!r}: a rescale that reads memory is not a stored combine")
     # Already separated by :func:`lift_body` — ``edges`` are the step's nested reductions, ``plain``
     # its statements. ``Fold.lower`` places each edge ahead of its reader, so the split preserves
     # evaluation order without the step ever having been a mixed sequence.
-    step = tuple(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids and id(stmt) not in combine_temps)
+    step = tuple(stmt for stmt in body if not isinstance(stmt, Accum) and id(stmt) not in write_ids)
     # Every ``Load`` in the step becomes a SLAB — a term declaring the coordinates it indexes —
     # and a semiring step's product ARGUMENTS become operand edges too (:func:`_factor_products`):
     # a chain the step computes ahead of a product is a zero-axis cone. That is what makes a
@@ -521,15 +475,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     gathers = {id(stmt) for stmt in step if isinstance(stmt, Load) and any(expr.free_vars() & defined for expr in stmt.index)}
     slabs = tuple(Fold.slab(stmt) for stmt in step if isinstance(stmt, Load) and id(stmt) not in gathers)
     plain = Body(stmt for stmt in step if not isinstance(stmt, Load) or id(stmt) in gathers)
-    ops = tuple(stmt.op for stmt in accums)
-    # A PLANAR fold folds the injected value itself, so the ``Accum``'s ``value`` IS the lift's
-    # result and the combine is the componentwise program — read back byte-identically to what it
-    # lowered from. A twisted one folds a rescale of it, so both halves come off the merge.
-    planar = not combine_temps and all(stmt.base is None for stmt in accums)
-    if planar:
-        combine, values = None, tuple(stmt.value for stmt in accums)
-    else:
-        combine, values = _combine_from_merge(body, accums, frozenset(combine_temps))
+    values, ops = tuple(stmt.value for stmt in accums), tuple(stmt.op for stmt in accums)
     edges, plain, hoists = _factor_products(plain, values, ops, (*edges, *slabs), scope, levels, axes, hoist=not writes)
     names = tuple(stmt.name for stmt in accums)
     # FORM the lift closed: a value the step reads from an enclosing level arrives as an operand;
@@ -538,11 +484,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
     edges, lift = _close((loop.axis.name,), edges, plain, values, axes, levels)
     if not all(op.has_identity for op in ops):
         raise ValueError(f"reduce loop {loop.axis.name!r}: an Accum op without an identity is not a monoid ⊕")
-    # The seed is the ⊕'s identity either way — the form a merge lowers to, and what the identity
-    # placement emits.
-    init = tuple(op.identity for op in ops)
-    if combine is None:
-        combine = Lambda.componentwise(ops, names)
+    init, combine = tuple(op.identity for op in ops), Lambda.componentwise(ops, names)
     if not writes:
         fold = Fold(operands=edges, lift=lift, init=init, combine=combine)
         return (_hoisted(fold, names, hoists, axes, levels) if hoists else fold), ()

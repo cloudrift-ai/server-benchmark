@@ -48,12 +48,6 @@ class Window:
     against it, since a mid-tensor slice end reads VALID keys belonging to the next slice, which
     the extent-only tail machinery would not exclude. ``None`` on both = the whole parent.
 
-    ``block`` marks both windows blocking produces — the outer axis that walks the stream a block
-    at a time and the inner axis that walks one block. It is the same kind of receipt ``partition``
-    is: nothing may block a stream twice, and the axis's OWN extent (not its parent's) is the
-    geometry a tile over it is sized against. A blocked axis is not a partition — it stays inside
-    one kernel, and the two are told apart by :attr:`Axis.step`, which only the outer one carries.
-
     ``partition`` marks the one window a CROSS-CTA SPLIT produced: this axis is one CTA's share of
     a reduce stream, not a tile of an iteration space. Every other window — the partition planner's
     ``M_b``/``M_t``/``M_r``, a carved or strided sub-axis — leaves it false. The distinction has to
@@ -66,7 +60,6 @@ class Window:
     base: Expr | None = None
     bound: Expr | None = None
     partition: bool = False
-    block: bool = False
 
 
 @dataclass(frozen=True)
@@ -79,8 +72,7 @@ class Axis:
     ``int`` / ``str`` to ``Dim`` for ergonomics, so ``Axis("m", 32)``
     keeps working.
 
-    ``step`` is the walk's stride (``None`` = 1); ``window`` is the slice of a parent axis this one
-    walks (:class:`Window` — its ``parent``
+    ``window`` is the slice of a parent axis this one walks (:class:`Window` — its ``parent``
     provenance and, for a cross-CTA slice, the absolute ``base`` / ``bound``). ONE windowing
     concept, read by the realizer and the mask machinery alike. Excluded from equality / hashing so
     Var-rename invariance is preserved — two Axes with the same name and extent are the same axis
@@ -90,29 +82,10 @@ class Axis:
     name: str
     extent: Dim
     window: Window | None = field(default=None, compare=False, hash=False)
-    #: The walk's stride, when it is not 1: the axis visits ``0, step, 2·step, …`` below ``extent``,
-    #: and ``lower`` renders it as a ``StridedLoop`` instead of a ``Loop``. This is what lets a
-    #: BLOCKED stream say "outer walks the parent axis in blocks" without the block WIDTH appearing
-    #: anywhere in the term — the σ that reads the absolute coordinate is then plain ``k_o + k_i``,
-    #: so the split is structural and the size stays here, in the table that owns every extent.
-    #: Part of identity: two axes that stride differently are different iterations.
-    step: Expr | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.extent, Dim):
             object.__setattr__(self, "extent", to_dim(self.extent))
-
-    @property
-    def trips(self) -> int | None:
-        """How many times this axis ITERATES — its extent, or ``ceil(extent / step)`` when it
-        strides (a blocked stream walks its parent one block at a time). ``None`` while either is
-        symbolic. Every partition sizes itself against this number — the coop band's lane share,
-        the ILP remainder, the cross-CTA width — and never against the extent, which for a strided
-        axis counts coordinates rather than steps."""
-        if not self.extent.is_static or (self.step is not None and not isinstance(self.step, Literal)):
-            return None
-        step = self.step.value if self.step is not None else 1
-        return -(-self.extent.as_static() // step)
 
     @property
     def source_axis(self) -> Axis | None:

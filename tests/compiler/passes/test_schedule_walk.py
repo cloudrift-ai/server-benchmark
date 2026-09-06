@@ -504,7 +504,7 @@ def test_a_scoped_partition_pin_on_a_serial_only_chain_site_enumerates_nothing(u
         operands=(inner,),
         lift=Lambda.closing(("j", "acc_inner"), Body(()), ("acc_inner",)),
         init=(0.0,),
-        combine=Lambda.componentwise(("add",), ("acc_outer",)),
+        base=Lambda.componentwise(("add",), ("acc_outer",)),
     )
     root = _chain_root(outer, results=("acc_outer",))
     tile = TileOp(op=root, place=Placement(free=(Axis("m", 4),)), axes=(Axis("m", 4), Axis("j", 4), _K), name="k_chain_probe", knobs={})

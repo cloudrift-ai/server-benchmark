@@ -1,11 +1,18 @@
 """``Fold`` — the ONE reduce term: ``reduce(⊕) ∘ map(f)`` in the λ-foldMap spelling.
 
 The whole stored vocabulary of Tile IR, and a PURE term throughout: an optional iteration
-``axis``, a pure ``lift`` :class:`~emmy.compiler.ir.pure.lam.Lambda`, the monoid's flat
-``(init, combine)`` pair, and a tuple of ``operands`` — the closed inputs, each an edge bound
-positionally to a lift param. Every reading (the map at zero axes, the bilinear
-:class:`ContractionView`, the :class:`SlabView` leaf, the serial step) is DERIVED from those
-params; nothing else is stored.
+``axis``, a pure ``lift`` :class:`~emmy.compiler.ir.pure.lam.Lambda`, the monoid's ``(init, base)``
+pair with the optional ``twist`` recipe that conjugates it, and a tuple of ``operands`` — the
+closed inputs, each an edge bound positionally to a lift param. Every reading (the ⊕ itself, the
+map at zero axes, the bilinear :class:`ContractionView`, the :class:`SlabView` leaf, the serial
+step) is DERIVED from those params; nothing else is stored.
+
+The fold's algebra is the twisted monoid of :mod:`~emmy.compiler.ir.pure.twist`, spelled in one
+vocabulary with the recipes: ``lift`` is the per-element contribution to the BASE state, ``base``
+the base monoid's componentwise ⊕, and ``twist`` the recipe carrying the bijection ``psi`` onto the
+stable carrier. The ⊕ the fold actually folds with is then derived —
+``combine(x, y) = psi(psi_inv(x) base psi_inv(y))`` — in the stable spelling the recipe certifies,
+and ``twist=None`` is the planar case where ``psi`` is the identity and ``combine`` IS ``base``.
 
 Nothing here is a :class:`~emmy.compiler.ir.stmt.base.Stmt`. A composed step — flash's ``Σ Q·K``
 ahead of its ``Σ_j P·V``, split-K's sliced contraction — is reached through ``operands``, and its
@@ -29,6 +36,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.lam import Lambda
+from emmy.compiler.ir.pure.twist import Recipe
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, OutputSpec, Stmt, StridedLoop
 from emmy.compiler.ir.stmt.body import free_names
@@ -134,11 +142,12 @@ class ReductionView:
 @dataclass(frozen=True)
 class Fold:
     """The ONE reduce term — ``reduce(⊕) ∘ map(f)``, the typed successor of the annotated reduce
-    ``Loop``. It splits the reduce's **algebra** (the loop-carried flat ⊕ — componentwise for a
-    plain ``sum`` / ``max`` / ``mean``, a rescaling program for online-softmax / flash — a plain
-    :class:`Lambda` either way) from its **structure** (the axis the lift binds and the per-element
-    ``step`` it folds). Every reading is **derived** from the stored params (:meth:`as_contraction`,
-    :meth:`as_slab`, :meth:`as_reduction`, :meth:`step`), never stored, and the loop nest is
+    ``Loop``. It splits the reduce's **algebra** (the base monoid ``base``, plus the ``twist``
+    recipe whose ``psi`` conjugates it into the rescaling program online-softmax / flash folds
+    with — :attr:`combine` derives that ⊕, and a planar ``sum`` / ``max`` / ``mean`` is the
+    identity case) from its **structure** (the axis the lift binds and the per-element ``step`` it
+    folds). Every reading is **derived** from the stored params (:attr:`combine`,
+    :meth:`as_contraction`, :meth:`as_slab`, :meth:`as_reduction`, :meth:`step`), never stored, and the loop nest is
     **synthesized on demand** (:meth:`lower`), never stored — so the same term tiles under any
     :class:`~emmy.compiler.ir.schedule.Reduce`, which is not a field here: the reduce partition is
     a site choice in ``TileOp.schedule``, read through ``ops.Sched``.
@@ -171,15 +180,25 @@ class Fold:
     # :class:`~emmy.compiler.ir.axis.Window` — ONE windowing vocabulary, the same one an axis's
     # split parentage uses, read by the realizer and the mask machinery alike.
     #
-    # ---- the λ-foldMap spelling — the fold's storage: a PURE ``lift`` ``λ(k, v₁…vₙ) → S``
+    # ---- the λ-foldMap spelling — the fold's storage: a PURE ``lift`` ``λ(k, v₁…vₙ) → B``
     # (params: the iteration var first, then one per operand result component, bound POSITIONALLY —
     # the names are this term's own, :attr:`bindings` pairs them with the edges, and :attr:`applied`
-    # spells them as the operands' results for every renderer) plus the TRUE monoid's flat
-    # ``(init, combine)`` pair whose combine carries the REAL accumulator names (its results). The
-    # serial step and the ``Accum`` forms are DERIVED (:attr:`step` / ``__post_init__``). --------- #
-    lift: Lambda = field(kw_only=True)  # CLOSED by ``Lambda.__post_init__``; formed by :meth:`Lambda.closing`
+    # spells them as the operands' results for every renderer) plus the monoid's ``(init, base)``
+    # pair, whose ``base`` carries the REAL accumulator names (its results), and the ``twist``
+    # recipe that conjugates it. The ⊕ itself (:attr:`combine`), the serial step and the ``Accum``
+    # forms are DERIVED (:attr:`combine` / :attr:`step` / ``__post_init__``). ------------------- #
+    lift: Lambda = field(kw_only=True)  # the per-element contribution; CLOSED by ``Lambda.__post_init__``
     init: tuple[float, ...] = ()  # the ⊕ seeds — op identities for a plain fold; (−inf, 0, …) LSE
-    combine: Lambda | None = field(kw_only=True, default=None)  # S × S → S — THE ⊕; None at zero axes
+    # The BASE monoid's ⊕, as the componentwise program ``base = componentwise(ops, states)`` — one
+    # op per carried component, and its RESULTS are the carrier's state names. ``None`` at zero
+    # axes, where there is no monoid at all.
+    base: Lambda | None = field(kw_only=True, default=None)
+    # The :class:`~emmy.compiler.ir.pure.twist.Recipe` this carrier instantiates, or ``None`` for a
+    # planar fold. It supplies the bijection ``psi`` onto the stable carrier and the certified
+    # stable spelling of the conjugate ``combine(x, y) = psi(psi_inv(x) base psi_inv(y))``, which
+    # :attr:`combine` derives. NAMED rather than restated: stability is not preserved by
+    # conjugation, so the stable program cannot be computed from ``psi`` and ``base``.
+    twist: Recipe | None = field(kw_only=True, default=None)
     # The per-step OBSERVER — the scan spelling: a pure λ(k, s₁…sₙ) over the carried state,
     # evaluated AFTER iteration k's combine (inclusive; exclusive is an init/index shift, never a
     # stored flag), binding the iteration var then the state positionally. Its results are FRESH
@@ -202,11 +221,11 @@ class Fold:
         stray = [type(edge).__name__ for edge in self.operands if not isinstance(edge, Fold)]
         if stray:
             raise TypeError(f"Fold operands must be terms, got {stray}; a gmem read is a term over one Load")
-        if self.combine is None:
+        if self.base is None:
             # The ZERO-AXIS node: no iteration and no monoid, so the only formation fact is the
             # positional binding — one lift param per operand RESULT COMPONENT, no leading
             # iteration var. (The projection (zero-axis) fold was exactly this, with ``fn`` for ``lift``.)
-            assert self.combine is None and not self.init, "a zero-axis Fold carries no monoid"
+            assert not self.init and self.twist is None, "a zero-axis Fold carries no monoid to seed or twist"
             assert self.observe is None, "a zero-axis Fold carries no per-step state to observe"
             # An operand that another operand is built OVER and passes through whole (the small
             # cone beside the larger one computed from it, both bound by their own names) is that
@@ -244,8 +263,8 @@ class Fold:
         # Formation validates the positional binding and the S × S → S arity; the planar-vs-twisted
         # reading is DERIVED (:meth:`as_reduction`), never a second stored spelling.
         n = len(self.init)
-        if len(self.combine.params) != 2 * n or len(self.combine.results) != n:
-            raise ValueError(f"Fold combine must be S × S → S at arity {n}: params={self.combine.params} results={self.combine.results}")
+        if len(self.base.params) != 2 * n or len(self.base.results) != n or self.base.components() is None:
+            raise ValueError(f"Fold base must be the componentwise ⊕ at arity {n}: params={self.base.params} results={self.base.results}")
         lam = self.lift
         assert lam.params, "a reducing lift binds its iteration var first"
         # One lift param per operand RESULT COMPONENT (a product edge — split-K's sliced
@@ -309,9 +328,9 @@ class Fold:
         the positional binding law is about; a consumer names what it binds itself
         (:attr:`bindings`), and never reads these names before the term is rendered.
         """
-        if self.combine is None:
+        if self.base is None:
             return self.applied.results
-        state = self.combine.results
+        state = self.base.results
         return state if self.observe is None else (*state, *self.observe.results)
 
     @cached_property
@@ -321,7 +340,7 @@ class Fold:
         operands' result components in order. The names are this term's own; how an operand spells
         its results is nobody else's business until the term is rendered (:attr:`applied`).
         """
-        params = self.lift.params[1 if self.combine is not None else 0 :]
+        params = self.lift.params[1 if self.base is not None else 0 :]
         out: list[tuple[str, Fold, int]] = []
         for edge in self.operands:
             out.extend((params[len(out)], edge, index) for index in range(len(edge.exposes)))
@@ -340,13 +359,27 @@ class Fold:
         """The axis this term binds — what the statement-door ``rewrite`` drops from σ for the subtree."""
         return frozenset() if self.axis is None else frozenset({self.axis})
 
+    @cached_property
+    def combine(self) -> Lambda | None:
+        """THE ⊕ this fold folds with — ``S × S → S``, ``None`` at zero axes. DERIVED, never
+        stored, so the carrier has ONE spelling of its algebra:
+
+        - planar (``twist is None``): ``combine = base``, the componentwise ⊕ itself;
+        - twisted: ``combine = psi ∘ base ∘ (psi_inv × psi_inv)`` over the same states — the
+          conjugate, in the numerically stable spelling the recipe authored and certifies.
+
+        Memoized on the term, which is immutable."""
+        if self.base is None or self.twist is None:
+            return self.base
+        return self.twist.program(self.base.results)
+
     @property
     def axis(self) -> str | None:
         """The name of the axis this term BINDS — its lift's iteration var, the first param — or
         ``None`` for a zero-axis term. A NAME: the extent and window are the evaluator's, held in
         the kernel's axis table (``TileOp.axes``) and handed to :meth:`lower`; a sum over 128 and
         one over 256 are the same term over different domains, like a slab under any M."""
-        return self.lift.params[0] if self.combine is not None else None
+        return self.lift.params[0] if self.base is not None else None
 
     @cached_property
     def free_axes(self) -> frozenset[str]:
@@ -456,7 +489,7 @@ class Fold:
     def as_slab(self) -> SlabView | None:
         """The :class:`SlabView` of this term — its one gmem read and the coordinates it declares —
         or ``None`` for a computed cone. Memoized on the term."""
-        if self.operands or self.combine is not None or len(self.lift.body) != 1 or not isinstance(self.lift.body[0], Load):
+        if self.operands or self.base is not None or len(self.lift.body) != 1 or not isinstance(self.lift.body[0], Load):
             return None
         return SlabView(load=self.lift.body[0])
 
@@ -530,7 +563,7 @@ class Fold:
         observed = self.observe.body if self.observe is not None else ()
         return Body((*lift.body, *merged, *observed))
 
-    def twist(self, recipe, axes) -> Fold | None:
+    def fuse(self, recipe: Recipe, axes) -> Fold | None:
         """This reduce fused onto the reduce it reads, by ``recipe`` — one fold carrying both
         states under the recipe's twisted ⊕ — or ``None`` when no channel of the recipe clicks.
         The ONE generic algorithm over the declarative recipes (:mod:`~emmy.compiler.ir.pure.twist`).
@@ -555,10 +588,8 @@ class Fold:
             if pview.ops is not None:
                 if len(pview.states) != 1 or pview.ops[0].reduce_canon != recipe.pivot:
                     continue
-            elif recipe.combine is not None and len(pview.states) != len(recipe.combine.results):
-                continue  # a fixed-arity recipe's ⊕ is over exactly its carrier; another recipe's fold is not its pivot
-            elif not pivot.combine.alpha_eq(recipe.program(pview.states)):
-                continue
+            elif pivot.twist is not recipe:
+                continue  # a twisted pivot must already carry THIS recipe: another one's carrier is not its pivot
             if axes[self.axis].extent != axes[pivot.axis].extent or axes[self.axis].window != axes[pivot.axis].window:
                 continue
             fused = self._twist(pivot, recipe)
@@ -642,13 +673,15 @@ class Fold:
             state = view.states[0]
             score = pivot.lift.results[0]
             injections = [
-                (state, channel.injection, self.init[0]) if c is channel else (f"{state}__{c.name}", c.injection, c.init)
-                for c in recipe.channels
+                (state, channel.injection, self.init[0], recipe.base[1 + index])
+                if c is channel
+                else (f"{state}__{c.name}", c.injection, c.init, recipe.base[1 + index])
+                for index, c in enumerate(recipe.channels)
                 if c is channel or c.pattern is None
             ]
             roles = dict(zip(channel.pattern.params[2:], extras, strict=True))  # the channel's extras, by role
             body, results, inits = list(pivot.lift.body), list(pivot.lift.results), list(pivot.init)
-            for name, injection, init in injections:
+            for name, injection, init, _ in injections:
                 names = {injection.params[0]: score, **{param: roles[param] for param in injection.params[1:]}}
                 names.update((stmt.name, f"{name}__{stmt.name}") for stmt in injection.body)
                 instance = injection.rename(names)
@@ -661,8 +694,9 @@ class Fold:
                 body=Body(body),
                 results=tuple(results),
             )
-            states = (*pview.states, *(name for name, _, _ in injections))
-            return Fold(operands=operands, lift=lift, init=tuple(inits), combine=recipe.program(states))
+            states = (*pview.states, *(name for name, _, _, _ in injections))
+            ops = (*pivot.base.components(), *(op for _, _, _, op in injections))
+            return Fold(operands=operands, lift=lift, init=tuple(inits), base=Lambda.componentwise(ops, states), twist=recipe)
         return None
 
     @cached_method
@@ -680,7 +714,7 @@ class Fold:
         """
         lead = () if self.axis is None else (self.axis,)
         mapping = {name: f"_a{index}" for index, name in enumerate((*lead, *self.lift.params[len(lead) + len(self.bindings) :]))}
-        own = self.lift.results if self.combine is None else self.exposes
+        own = self.lift.results if self.base is None else self.exposes
         mapping.update((name, f"_r{index}") for index, name in enumerate(own))
         for index, (param, _, _) in enumerate(self.bindings):
             mapping.setdefault(param, f"_e{index}")
@@ -690,19 +724,20 @@ class Fold:
                 if name not in mapping:
                     mapping[name] = f"_v{counter}"
                     counter += 1
-        combine = None
-        if self.combine is not None:
-            # The combine's own names — its second operand, its temps — are nobody else's: they
-            # renumber after the term's, so how a fold spelled its accumulators never reaches the form.
+        base = None
+        if self.base is not None:
+            # The ⊕'s own names — its second operand — are nobody else's: they renumber after the
+            # term's, so how a fold spelled its accumulators never reaches the form. The twisted
+            # conjugate needs no arm here: it is DERIVED from these states, so it follows them.
             own = dict(mapping)
-            for name in (*self.combine.params, *(name for stmt in self.combine.body for name in stmt.defines())):
+            for name in self.base.params:
                 own.setdefault(name, f"_c{len(own)}")
-            combine = self.combine.rename(own)
+            base = self.base.rename(own)
         return replace(
             self,
             operands=tuple(edge.canonical() for edge in self.operands),
             lift=self.lift.rename(mapping),
-            combine=combine,
+            base=base,
             # The observer binds the iteration var and reads the carried state, so it renames in
             # LOCKSTEP: renaming the axis without it leaves the observer reading a name that no
             # longer exists, and a scan would then canonicalize to something that is not a term.
@@ -770,10 +805,10 @@ class Fold:
                 internal.add(term.axis)
             for name in term.free_axes:
                 readers[name] = readers.get(name, 0) + 1
-            if term.combine is None:
+            if term.base is None:
                 origin.update((name, (id(term), "step")) for stmt in term.lift.body for name in stmt.defines())
             else:
-                origin.update((name, (id(term), "state")) for name in term.combine.results)
+                origin.update((name, (id(term), "state")) for name in term.base.results)
                 if term.observe is not None:
                     origin.update((name, (id(term), "observed")) for name in term.observe.results)
             pending.extend(reversed(term.operands))
@@ -917,7 +952,7 @@ def _(s: Fold, rename, sigma, axis_fn):
         body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.lift.body)),
         results=tuple(rename(r) for r in s.lift.results),
     )
-    combine = s.combine.rename(rename) if s.combine is not None else None
+    base = s.base.rename(rename) if s.base is not None else None
     observe = None
     if s.observe is not None:
         # The observer renames in lockstep: param 0 tracks the axis, the state params track the
@@ -927,7 +962,7 @@ def _(s: Fold, rename, sigma, axis_fn):
             body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.observe.body)),
             results=tuple(rename(r) for r in s.observe.results),
         )
-    return replace(s, operands=operands, lift=lift, combine=combine, observe=observe)
+    return replace(s, operands=operands, lift=lift, base=base, observe=observe)
 
 
 __all__ = [

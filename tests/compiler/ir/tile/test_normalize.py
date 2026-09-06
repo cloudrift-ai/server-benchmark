@@ -618,7 +618,7 @@ def test_share_common_cones_unifies_internally_renamed_copies() -> None:
 
     def cone(load: str, product: str, row: str = "m") -> Fold:
         body = Body((Load(name=load, input="x", index=(Var(row), Var("k"))), Assign(name=product, op="multiply", args=(load, load))))
-        return Fold(lift=Lambda.closing(("k",), body, (product,)), init=(0.0,), combine=Lambda.componentwise(("add",), ("acc",)))
+        return Fold(lift=Lambda.closing(("k",), body, (product,)), init=(0.0,), base=Lambda.componentwise(("add",), ("acc",)))
 
     def consumer(inner: Fold, out: str) -> Fold:
         return projection((inner,), (Assign(name=out, op="exp", args=("acc",)),), (out,))

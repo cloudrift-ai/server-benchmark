@@ -81,13 +81,12 @@ def test_observer_formation_gates() -> None:
 
 def test_exp_family_declines_an_observer() -> None:
     names = ("m_i", "l_i")
-    combine = SOFTMAX.program(names)
     lift = Lambda(
         params=("k",),
         body=Body((Load(name="s0", input="s", index=(Var("k"),)), Const(name="one", value=1.0))),
         results=("s0", "one"),
     )
-    fold = Fold(lift=lift, init=(float("-inf"), 0.0), combine=combine)
+    fold = Fold(lift=lift, init=(float("-inf"), 0.0), base=Lambda.componentwise(SOFTMAX.base[:2], names), twist=SOFTMAX)
     observe = Lambda(params=("k", *names), body=Body((Assign(name="m__obs", op="copy", args=("m_i",)),)), results=("m__obs",))
     with pytest.raises(AssertionError, match="does not support a per-step observer"):
         dataclasses.replace(fold, observe=observe)

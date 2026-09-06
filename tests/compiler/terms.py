@@ -61,7 +61,7 @@ def reduction(axis: Axis | str, operands: tuple, body, accs: tuple[str, ...], op
     name = axis.name if isinstance(axis, Axis) else axis
     ops = tuple(_impl(op) for op in (ops if isinstance(ops, tuple) else (ops,) * len(accs)))
     lift = Lambda.closing((name, *_bound(operands)), body, tuple(f"{acc}__v" for acc in accs))
-    return Fold(operands=operands, lift=lift, init=tuple(op.identity for op in ops), combine=Lambda.componentwise(ops, accs))
+    return Fold(operands=operands, lift=lift, init=tuple(op.identity for op in ops), base=Lambda.componentwise(ops, accs))
 
 
 def contraction(axis: Axis | str, a: Fold | Load, *channels: tuple[Fold | Load, str], product="multiply", plus="add") -> Fold:

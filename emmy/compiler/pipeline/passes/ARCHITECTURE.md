@@ -515,7 +515,7 @@ loop. Nested reductions are ordinary `Fold` statements in the parent lambda, so 
 without a placement or value-cut analysis.
 
 `020_twisted` is a separate algebraic rewrite over the canonical tree. It fuses every reduce that reads a reduce
-into the twisted monoid a recipe recognizes (`Fold.twist` — the pivot's state is the operand binding, the score the
+into the twisted monoid a recipe recognizes (`Fold.fuse` — the pivot's state is the operand binding, the score the
 sub-cone alpha-equal to the pivot's own map, the rest a channel's pattern by canonical form), hoisting factors
 constant along the axis out of the fold first. Softmax, SDPA, and causal SDPA differ only in carrier arity and
 score/value lambdas; there is no operation-family matcher. `040_schedule` enumerates the complete

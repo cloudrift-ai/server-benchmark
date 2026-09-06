@@ -413,7 +413,8 @@ def _state_fold(axis: Axis, algebra: Fold, loads: tuple[Load, ...]) -> Fold:
         operands=tuple(Fold.slab(load) for load in loads),
         lift=Lambda(params=(axis.name, *values), body=Body(), results=values),
         init=algebra.init,
-        combine=algebra.combine,
+        base=algebra.base,
+        twist=algebra.twist,
     )
 
 

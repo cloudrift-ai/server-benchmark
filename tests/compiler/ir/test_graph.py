@@ -430,7 +430,7 @@ def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
     inner = Fold(
         lift=Lambda.closing(("k",), Body((Load(name="value", input="x", index=(Var("m"), Var("k"))),)), ("value",)),
         init=(0.0,),
-        combine=addition("inner_acc"),
+        base=addition("inner_acc"),
     )
     # The nested term rides an OPERAND EDGE — a Fold tree composes through operands, so the
     # enclosing lift binds the inner reduce's result positionally instead of holding the term.
@@ -439,7 +439,7 @@ def test_rename_node_rewrites_load_in_nested_fold_lambda() -> None:
         operands=(inner,),
         lift=Lambda.closing(("m", state), Body(), (state,)),
         init=(0.0,),
-        combine=addition("outer_acc"),
+        base=addition("outer_acc"),
     )
 
     graph = Graph()

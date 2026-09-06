@@ -162,7 +162,7 @@ def _split_k() -> Fold:
         operands=(inner,),
         lift=Lambda(params=("ksplit", "acc0"), body=Body(()), results=("acc0",)),
         init=(0.0,),
-        combine=Lambda.componentwise(("add",), ("acc0",)),
+        base=Lambda.componentwise(("add",), ("acc0",)),
     )
 
 

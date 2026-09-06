@@ -199,7 +199,7 @@ creates one zero-axis root `Fold` over the lifted cell.
 
 `pipeline/passes/lowering/tile/020_twisted.py` runs after construction canonicalization and before scheduling. It
 tries every twist recipe (`ir/pure/twist.py`) on every reduce that reads a reduce as an operand — the shape the lift
-gives a two-pass softmax — and rewrites the tree's operands onto each fold `Fold.twist` returns, to a fixpoint. Pure
+gives a two-pass softmax — and rewrites the tree's operands onto each fold `Fold.fuse` returns, to a fixpoint. Pure
 softmax is the arity-two case; SDPA adds expectation components, which join by the same call once the `1/l` factor
 constant along the axis has hoisted out of the fold, and a causal mask is simply part of the shared score cone. The
 pass has no operation-family matcher: a recipe clicks by canonical form, or it does not.

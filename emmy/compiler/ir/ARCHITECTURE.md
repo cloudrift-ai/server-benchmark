@@ -24,7 +24,7 @@ A **statement** (`ir/stmt/`) occupies a position in an instruction stream: it ha
 scope, and — for a carrier — a seed the enclosing scope has to declare. A **pure term**
 (`ir/pure/`) denotes a value: it binds names, carries an algebra, substitutes and compares up to
 α-renaming, and has no position at all. `Lambda`, the `Fold` term and the twist recipes (`ir/pure/twist.py` — a
-twisted monoid as data, which `Fold.twist` fuses a reduce and the reduce it reads into) all live on the term side.
+twisted monoid as data, which `Fold.fuse` fuses a reduce and the reduce it reads into) all live on the term side.
 
 **A pure class is never a `Stmt` subclass and never occupies a statement position.** When a term
 has to reach the instruction stream it is RENDERED into statements at the point of use — never
@@ -402,8 +402,9 @@ spelling: two lambdas over roles for an open channel count (softmax's pivot adva
 recipe for softmax and flash attention alike) or one lambda over every state pair (Welford's fixed carrier
 `(sum, count, mean, M2)`). `Recipe.program(states)` instantiates either over a fold's state names by renaming, and
 the definition certifies the data: the program is the conjugate of the base on random states, the seeds are the base
-identities under ψ⁻¹, the injections are the lift seen through ψ. `Fold.twist(recipe)`
-fuses a reduce onto the reduce it reads, found among its operands: the pivot's state is the lift param bound to it,
+identities under ψ⁻¹, the injections are the lift seen through ψ. `Fold.fuse(recipe)`
+fuses a reduce onto the reduce it reads, found among its operands, and the fused fold stores the recipe in its
+`twist` field so the stable ⊕ derives rather than being baked in: the pivot's state is the lift param bound to it,
 the score is the sub-cone of the lift alpha-equal to the pivot's own per-element map (operand for operand, through a
 projection's
 components), and what remains, in role order, must equal a channel's pattern by canonical form. A click gives the
@@ -431,15 +432,17 @@ commutative product's arguments does not change them. Formation is strict: a ker
 result
 may be a bare
 `float` literal — ι is spelled in the lift (softmax's singleton
-is `(x, 1)`). The TRUE monoid is the flat `(init, combine)` pair stored directly on the `Fold` (the `Monoid` wrapper
-class dissolved at 1r) — ONE program, `combine : S × S → S` a pure `Lambda` whose
-results carry the fold's REAL accumulator names; the serial streaming step is NEVER stored (it derives as combine
-specialized at the singleton), so update-vs-combine consistency holds by construction. `Lambda.componentwise`
-builds a plain fold's combine (DEGENERATE is the derived `Lambda.components()` shape reading, not a storage
-arm). A `Fold` carries NO
+is `(x, 1)`). The monoid is the `(init, base)` pair stored directly on the `Fold` beside the optional `twist`
+recipe (the `Monoid` wrapper class dissolved at 1r) — `base : S × S → S` a pure `Lambda`, always the componentwise ⊕
+that `Lambda.componentwise` builds, whose results carry the fold's REAL accumulator names. The ⊕ the fold folds with
+is DERIVED from that pair (`Fold.combine` — `base` itself when `twist` is `None`, the recipe's stable conjugate
+`psi(psi_inv(x) base psi_inv(y))` otherwise), and the serial streaming step is derived from it in turn (combine
+specialized at the singleton), so there is one stored spelling of the algebra and update-vs-combine consistency holds
+by construction. A `Fold` carries NO
 precision: accumulator dtype is a KERNEL-IR fact, stamped on the lowered `Accum` by the Init-placement pass, and a
-reduce `Loop` arriving with a typed `Accum` is not canonical input to total lift. A twisted monoid's combine is a
-recipe's program, recognized by canonical form (`Fold.twist`), never by a stored family name;
+reduce `Loop` arriving with a typed `Accum` is not canonical input to total lift. A twisted monoid's combine is the
+recipe's program, reached by NAMING the recipe the fold instantiates rather than by restating it; the fusion that
+names it recognizes the pair by canonical form (`Fold.fuse`), never by a stored family name;
 `tests/compiler/ir/pure/test_twist.py` pins its associativity on random states.
 
 ### `loop/ir.py` — LoopOp types

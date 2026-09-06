@@ -17,7 +17,7 @@ recipe serves any channel count; Welford's as one lambda). The definition certif
 program is the conjugate of the base on every state pair, the seeds are the base identities under
 ψ⁻¹, the injections are the lift seen through ψ (``tests/compiler/ir/pure/test_twist.py``).
 
-The one generic algorithm that applies any recipe is :meth:`Fold.twist`, which finds the pivot
+The one generic algorithm that applies any recipe is :meth:`Fold.fuse`, which finds the pivot
 among ``F``'s own operands: matching is alpha-invariant by construction — ``F``'s lift binds its
 operands positionally, so the pivot's state is the param bound to ``G``; the score is whatever
 sub-cone of ``F``'s lift is alpha-equal to ``G``'s own per-element map, operand for operand; and
@@ -64,7 +64,7 @@ class Recipe:
     factors the move puts on every carried channel, ``rescale`` takes one channel pair and those
     factors ``(s, s′, *factors)`` to the channel's merged value. ``combine`` is one lambda over
     every state pair in role order — pivot, then the channels, then the same with ``__o`` — for a
-    carrier of fixed arity. Applied by the one generic algorithm, :meth:`Fold.twist`."""
+    carrier of fixed arity. Applied by the one generic algorithm, :meth:`Fold.fuse`."""
 
     name: str
     base: tuple[str, ...]

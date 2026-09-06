@@ -296,7 +296,7 @@ def _hoisted(fold: Fold, names: tuple[str, ...], hoists: dict, axes: tuple, leve
     original state names: the fold reduces into ``<state>__sum``, the projection multiplies (or
     divides) that by each factor in spine order and exposes the result as ``<state>``."""
     inner = {name: f"{name}__sum" for index, name in enumerate(names) if index in hoists}
-    fold = replace(fold, combine=fold.combine.rename(inner))
+    fold = replace(fold, base=fold.base.rename(inner))
     terms: list[Fold] = [fold]
     epilogue: list[Stmt] = []
     for index, name in enumerate(names):
@@ -486,7 +486,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
         raise ValueError(f"reduce loop {loop.axis.name!r}: an Accum op without an identity is not a monoid ⊕")
     init, combine = tuple(op.identity for op in ops), Lambda.componentwise(ops, names)
     if not writes:
-        fold = Fold(operands=edges, lift=lift, init=init, combine=combine)
+        fold = Fold(operands=edges, lift=lift, init=init, base=combine)
         return (_hoisted(fold, names, hoists, axes, levels) if hoists else fold), ()
     stored = tuple(dict.fromkeys(value for stmt in writes for value in stmt.values))
     if any(value not in names for value in stored):
@@ -496,7 +496,7 @@ def scan_from_loop(loop: Loop, axes: tuple = (), levels: tuple = ()) -> tuple[Fo
         body=Body(tuple(Assign(name=f"{value}__obs", op="copy", args=(value,)) for value in stored)),
         results=tuple(f"{value}__obs" for value in stored),
     )
-    fold = Fold(operands=edges, lift=lift, init=init, combine=combine, observe=observe)
+    fold = Fold(operands=edges, lift=lift, init=init, base=combine, observe=observe)
     renamed = tuple(replace(stmt, values=tuple(f"{value}__obs" for value in stmt.values)) for stmt in writes)
     return fold, renamed
 

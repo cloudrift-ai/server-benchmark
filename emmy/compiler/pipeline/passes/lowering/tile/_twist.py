@@ -110,7 +110,7 @@ def _hoist_invariant(fold: Fold) -> tuple[Fold, Fold] | None:
         body=Body((*kept, *product)),
         results=(value,),
     )
-    inner = replace(fold, operands=operands, lift=lift, combine=fold.combine.rename({state: inner_state}))
+    inner = replace(fold, operands=operands, lift=lift, base=fold.base.rename({state: inner_state}))
     epilogue: list[Assign] = []
     current = inner_state
     for index, leaf in enumerate(invariant):
@@ -182,7 +182,7 @@ def _click(root: Fold, axes: dict) -> dict[int, tuple[Fold, int]] | None:
             continue
         for recipe in RECIPES:
             for candidate, stands_in in _candidates(term):
-                fused = candidate.twist(recipe, axes)
+                fused = candidate.fuse(recipe, axes)
                 if fused is not None:
                     pivot = _pivot_of(candidate, fused)
                     return {id(term): stands_in(fused, len(fused.exposes) - len(term.exposes)), id(pivot): (fused, 0)}

@@ -1,0 +1,74 @@
+# RMSNorm k=4096 cut at its stored-Fold seam: the reduce half computes the per-row rsqrt, the
+# elementwise half multiplies it back over the 4096-wide output sweep. This pins a real worker
+# inventory on the elementwise half -- the case that made the sweep partition necessary.
+#
+# That half used to be offered ONE schedule, and to run 512 threads each walking 4096 elements.
+# Two mechanisms give a kernel more than one thread per output cell -- a contraction's warp split
+# and a cooperating reduce's ``coop`` lanes -- and both attach to something reduction-shaped, so a
+# bare elementwise map fell to the one-thread-per-cell tier with its sweep serial inside. Measured
+# on an RTX 5090 (CUDA 13.0, -O3): 885.9 us for this half against 5.4 us for the whole fused
+# kernel, which is why every placement cut with an elementwise downstream half looked hopeless.
+#
+# It now takes the third path: a kernel whose only work is a free output sweep distributes that
+# sweep across ``WORK`` threads through the same ``_lane_close`` a cooperating reduce uses for its
+# projection. Each lane owns a strided slice and writes its own cells, so there is no combine and
+# no store guard. The emitted body is the fused kernel's shape -- ``for a2 in sweep_co..4096:128``.
+# Widening the enumeration alone does NOT do this: without the emitter half all nine rows compile
+# to byte-identical CUDA. Both halves are required, which is what this case pins.
+#
+# Measured after the change: 4.2 us for this half, and the cut arm 6.3 us against 5.4 us fused --
+# a 211x kernel speedup that turns the placement fork from a foregone conclusion into a real
+# comparison. Correctness checked against eager (max abs error 3e-08).
+compute_cap: [12, 0]
+programs:
+- inputs: [x]
+  outputs: [rms_norm]
+  nodes:
+  - id: p_weight
+    op: constant
+    attrs:
+      name: p_weight
+      value: null
+      context_value: null
+      load_ops:
+        __tuple__: []
+      source_path: weight
+      source_parts:
+        __tuple__: []
+      source_shape:
+        __tuple__: [4096]
+      source_dtype: float32
+      source_graph: null
+    outputs:
+    - - p_weight
+      - f32
+      - [4096]
+  - id: x
+    op: input
+    outputs:
+    - - x
+      - f32
+      - [512, 4096]
+  - id: rms_norm
+    op: torch.rms_norm
+    attrs: {eps: 1.0e-06}
+    inputs: [x, p_weight]
+    outputs:
+    - - rms_norm
+      - f32
+      - [512, 4096]
+configs:
+- program: 0
+  target:
+    origins: [rms_norm]
+  realizations:
+  - name: k_rms_norm_86ddb3.c342c72939b8
+    bindings: {}
+    pins: {FAST_MATH: false, PLACE@map.1/map: cut}
+    knobs: {WORK: t128, REDUCE: coop, RASTER: ''}
+    identity: 97b9a41c07253c3dfa09c8f01e5f949c07f7ee4e37f1f67ea036239c0069cdf9
+  - name: k_rms_norm_86ddb3.c342c72939b8.cac64900859e
+    bindings: {}
+    pins: {FAST_MATH: false}
+    knobs: {WORK: t512, RASTER: ''}
+    identity: cac64900859e5707820fc1f6b73473c8696a161414cc219fdff81472315525e2

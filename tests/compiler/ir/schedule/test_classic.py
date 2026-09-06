@@ -45,8 +45,8 @@ from emmy.compiler.ir.schedule.classic import (
     parse_edge_site,
     parse_node_id,
 )
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop
-from emmy.compiler.ir.tile import TileOp
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
+from emmy.compiler.ir.tile import OutputSpec, TileOp
 from emmy.compiler.pipeline.fork import DeferredFork, iter_leaves, schedule_forks
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop
 from tests.compiler.helpers import classic_cartesian_assignments, enumerate_classic_reference
@@ -176,7 +176,9 @@ def test_independent_nodes_compose_only_at_matching_physical_axis_geometry() -> 
     first = contraction(k1, Load("a1", "a1", (Var("m"), Var("k1"))), (Load("b1", "b1", (Var("k1"), Var("n"))), "left"))
     second = contraction(k2, Load("a2", "a2", (Var("n"), Var("k2"))), (Load("b2", "b2", (Var("k2"), Var("m"))), "right"))
     root = projection((first, second), (), ("left", "right"))
-    problem = (TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k1, k2)), Context.from_target((12, 0)))
+    # Each store reads its own root, so the projection partitions by root and both may be tiled.
+    stores = tuple(OutputSpec(Write(output=name, index=(Var("m"), Var("n")), value=name)) for name in ("left", "right"))
+    problem = (TileOp(op=root, place=Placement(free=(m, n)), axes=(m, n, k1, k2), output_specs=stores), Context.from_target((12, 0)))
 
     def pick(context, node, choice):
         site = context.site(node)

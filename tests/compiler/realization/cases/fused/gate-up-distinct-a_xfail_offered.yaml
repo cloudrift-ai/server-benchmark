@@ -1,7 +1,9 @@
 # Two contraction channels that do NOT share an A value — each projection reads its own
 # activation, the NVFP4 gate/up shape where each channel carries its own quantized input.
-# The pin is OFFERED (242 enumerated rows carry it) and then refused at lowering with
-# 'an output-tiled root must own each output specification independently'.
+# The pin tiles both contraction roots of a projection whose one output reads both, which
+# the kernel binder refuses ('an output-tiled root must own each output specification
+# independently'); the schedule offer now applies that rule, so the row is never enumerated
+# (it used to be offered — 242 rows carried it — and refused at lowering).
 #
 # evidence: gate-up-shared-a.yaml is the same program, same shapes, same dtype and the same
 # pin, differing only in that both channels read one activation — and it realizes, builds and

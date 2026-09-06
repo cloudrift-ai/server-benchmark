@@ -469,3 +469,79 @@ def test_compute_fill_edges_remain_independent_product_factors(monkeypatch) -> N
     warp_assignments = tuple(assignment for assignment in reference if assignment.nodes[site].tile.is_warp)
     assert warp_assignments
     assert all({edge.stage.transport for edge in assignment.edges.values()} == {"smem"} for assignment in warp_assignments)
+
+
+def _two_root_projection(m: Axis, n: Axis, body, results: tuple[str, ...], outputs: dict, specs: tuple) -> TileOp:
+    """Two contraction roots with DISTINCT A operands under one projection — the NVFP4 gate/up shape
+    where each channel reads its own quantized activation, spelled over ``body`` / ``results``."""
+    k0, k1 = Axis("k0", 132), Axis("k1", 132)
+
+    def channel(k: Axis, a: str, b: str, acc: str):
+        a_edge = Load(name=f"{a}_e", input=a, index=(Var("m"), Var(k.name)))
+        return contraction(k, a_edge, (Load(name=f"{b}_e", input=b, index=(Var(k.name), Var("n"))), acc))
+
+    root = projection((channel(k0, "a0", "b0", "acc0"), channel(k1, "a1", "b1", "acc1")), body, results)
+    shapes = {"a0": (128, 132), "b0": (132, 128), "a1": (128, 132), "b1": (132, 128)}
+    return TileOp(
+        op=root,
+        place=Placement(free=(m, n)),
+        axes=(m, n, k0, k1),
+        inputs={name: Tensor(name, shape, "f16") for name, shape in shapes.items()},
+        outputs=outputs,
+        output_specs=specs,
+    )
+
+
+def _tiled_root_sets(tile: TileOp, target, monkeypatch) -> set[tuple[int, ...]]:
+    """Which root sites each enumerated row output-tiles, over a one-atom catalog."""
+    plan = Tile.parse("mma_m16n8k16_f16_f32/f2x2/k2", Work.parse("w2x2"))
+    monkeypatch.setattr(classic, "scalar_tile_moves", lambda: [Tile()])
+    monkeypatch.setattr(classic, "warp_tile_moves", lambda atoms: [plan] if plan.atom.name in atoms else [])
+    monkeypatch.setattr(classic, "stage_moves", lambda *, warp, ctx=None: [])
+    roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
+    leaves = _schedule_leaves(tile, "gate_up", target)
+    assert leaves
+    return {tuple(site for site in roots if leaf.schedule.nodes[site].tile.is_tiled) for leaf in leaves}
+
+
+def test_shared_output_projection_offers_at_most_one_output_tiled_root(monkeypatch) -> None:
+    """One output reads BOTH accumulators, so the projection does not partition by root and the
+    kernel binder binds at most one output-tiled root (the other reduce lowers serially inside
+    the projection). The offer applies the binder's rule: no row tiles both roots — that row was
+    offered and then refused at materialize — while each root still reaches the tile tier alone."""
+    from emmy.compiler.ir.stmt import Write
+    from emmy.compiler.ir.tile import OutputSpec
+
+    m, n = Axis("m", 128), Axis("n", 128)
+    tile = _two_root_projection(
+        m,
+        n,
+        (Assign("v", "multiply", ("acc0", "acc1")),),
+        ("v",),
+        {"out": Tensor("out", (128, 128), "f16")},
+        (OutputSpec(Write(output="out", index=(Var("m"), Var("n")), value="v")),),
+    )
+    roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
+    assert _tiled_root_sets(tile, Context.from_target((12, 0)), monkeypatch) == {(), (roots[0],), (roots[1],)}
+
+
+def test_partitioned_projection_still_offers_both_roots_output_tiled(monkeypatch) -> None:
+    """Each output reads its own accumulator: the projection partitions by root, the binder binds
+    both output-tiled roots into one kernel, and the offer keeps that row."""
+    from emmy.compiler.ir.stmt import Write
+    from emmy.compiler.ir.tile import OutputSpec
+
+    m, n = Axis("m", 128), Axis("n", 128)
+    tile = _two_root_projection(
+        m,
+        n,
+        (Assign("v0", "copy", ("acc0",)), Assign("v1", "copy", ("acc1",))),
+        ("v0", "v1"),
+        {"out0": Tensor("out0", (128, 128), "f16"), "out1": Tensor("out1", (128, 128), "f16")},
+        (
+            OutputSpec(Write(output="out0", index=(Var("m"), Var("n")), value="v0")),
+            OutputSpec(Write(output="out1", index=(Var("m"), Var("n")), value="v1")),
+        ),
+    )
+    roots = tuple(tile.node_id(edge) for edge in tile.op.operands)
+    assert roots in _tiled_root_sets(tile, Context.from_target((12, 0)), monkeypatch)

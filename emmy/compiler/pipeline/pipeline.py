@@ -526,10 +526,10 @@ class Pipeline:
         * **Structural retirement** — a refused row on a fragment
           kernel blocklists at that piece's own schedule fork and the
           composed route replays; only once no row of the piece binds
-          does a resolution that took a *structural* pick (the trace
-          contains a ``Graph`` decision) retire structural picks
-          wholesale (``price_structural=False``) and re-resolve down
-          the keep-fused branch.
+          is the cut that minted it (the ``Graph`` decision whose
+          ``minted`` ids name the piece) blocklisted at its own fork,
+          so that one splice is withdrawn and every other kernel-set
+          decision stays priced by the evidence.
 
         Retry orchestration, the ``rejections`` sink, and the loud
         :class:`LoweringError` on an un-lowered node are greedy search
@@ -676,7 +676,10 @@ class Decision:
     * ``score`` — the decide callback's predicted µs for the pick
       (``None`` when the decide didn't rank, e.g. option-0 fallback).
     * ``n_options`` — raw option count at the fork (a lazy fork tree
-      counts as one — its leaves are the decide callback's to expand)."""
+      counts as one — its leaves are the decide callback's to expand).
+    * ``minted`` — the graph ids of the kernels a ``"graph"`` pick spliced in (the splice
+      receipt's post-promotion ids), so a piece that later fails to lower can be traced back
+      to the cut that minted it; empty for an ``"op"`` pick."""
 
     rule_name: str
     node_id: str
@@ -684,6 +687,7 @@ class Decision:
     knob_delta: dict
     score: float | None
     n_options: int
+    minted: tuple[str, ...] = ()
 
 
 @dataclass
@@ -792,7 +796,7 @@ class Run:
                 if option is None:
                     raise ValueError(f"decide returned a branch Fork at {match.rule.name!r} — return a concrete option or a leaf Fork")
                 knob_delta = _choice_knobs(choice, option, root_op)
-                cand.apply(match, option, knobs=knob_delta)
+                minted = cand.apply(match, option, knobs=knob_delta)
                 if domain is not None:
                     _remember_structural_decision(cand.structural_decisions, root_op, domain, knob_delta)
                 assert trace is not None
@@ -804,6 +808,7 @@ class Run:
                         knob_delta=knob_delta,
                         score=fp.score,
                         n_options=len(options),
+                        minted=minted or (),
                     )
                 )
                 return None

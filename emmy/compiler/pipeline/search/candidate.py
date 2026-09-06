@@ -165,14 +165,15 @@ class Candidate:
         self.apply(match, options[0])
         return _REWRITE_APPLIED
 
-    def apply(self, match: Match, option: Op | Graph, *, knobs: dict | None = None) -> None:
+    def apply(self, match: Match, option: Op | Graph, *, knobs: dict | None = None) -> tuple[str, ...] | None:
         """Lazy mode (called by ``LazyCandidate.resolve`` and
         internally by :meth:`try_rewrite` for single-option matches):
         apply the specific ``option`` to this candidate's graph.
         Mutates the graph, logs the rewrite (debug diff +
         ``run.dump.on_rule`` snapshot), bumps cursor ``n_applied`` for functional
         splices, and advances the rule-batch cursor when
-        ``match.is_last``.
+        ``match.is_last``. Returns the graph ids a ``Graph`` splice minted
+        (the receipt's post-promotion compute ids), ``None`` for an ``Op`` rebind.
 
         ``Op`` rebinds ``root.op`` (id / inputs / hints kept);
         ``Graph`` is a fragment spliced via ``Graph.splice``. On the
@@ -198,6 +199,7 @@ class Candidate:
         after it, carrying the splice's receipt (where the provenance
         strategy threads op provenance). See ``pipeline.strategy``."""
         self._log_apply(match, option)
+        minted = None
         if isinstance(option, Op):
             old_op = self.graph.nodes[match.root_node_id].op
             if option is not old_op:
@@ -223,7 +225,9 @@ class Candidate:
             for strat in strategies:
                 strat.on_spliced(spliced)
             self.cursor.n_applied += 1
+            minted = receipt.new_compute_ids
         self._advance_if_last(match, applied=True)
+        return minted
 
     def _log_apply(self, match: Match, option: Op | Graph) -> None:
         """Render a per-rule diff at DEBUG and route a structured

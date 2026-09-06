@@ -400,56 +400,74 @@ def test_tuning_contains_raising_fork_thunk(caplog):
 
 # ---------------------------------------------------------------------------
 # A refused row on ONE piece of a composed route re-ranks that piece inside the
-# same structural route; the structural decision is revisited only once no row
-# of the piece binds. Observed on the DeepSeek-V4 ``post4096`` twin: the greedy
-# elected the composed placement route, the residual root's top-ranked row was
-# refused by the kernel binder (an output-tiled root forest covering an
-# incomplete projection), and the strategy retired the structural picks
-# wholesale — deploying one 2^38-trip fused kernel instead of the ten-kernel
-# plan that was one refused row away.
+# same structural route, across as many retries as the piece has rows; once no
+# row of the piece binds, the one structural pick retired is the cut that minted
+# the piece, so every other kernel-set decision stays priced by evidence.
+# Observed on the DeepSeek-V4 ``post4096`` twin: the greedy elected the composed
+# placement route, a consumer piece's top-ranked row was refused by the kernel
+# binder, and the retry could never re-rank it — the blocklist was keyed on the
+# terminal node's knob row, which a kernel-stage pass had stamped with a policy
+# knob (``LOOPIFY``) no schedule leaf spells — so the second attempt re-picked
+# the same row and the strategy retired the structural picks wholesale, onto the
+# fused root the disqualification index already priced ``inf``.
 # ---------------------------------------------------------------------------
 
 
-def _composed_fragment() -> Graph:
-    """The composed route ``x -> y_ws (k_ws) -> y__cut (k_residual)`` replacing ``y``; the splice
-    hands ``y``'s id to the residual root, so the terminal tells the routes apart by op name."""
+def _composed_fragment(input_id: str, suffix: str) -> Graph:
+    """The composed route ``input -> y_ws (k_ws) -> y__cut (k_residual)`` replacing the kernel it is
+    offered on; the splice hands that kernel's id to the residual root, so the terminal tells the
+    routes apart by op name."""
     g = Graph()
-    g.add_node(op=InputOp(), inputs=[], output=Tensor("x", (4,), "f32"), node_id="x")
-    g.add_node(op=TileOp(name="k_ws"), inputs=["x"], output=Tensor("y_ws", (4,), "f32"), node_id="y_ws")
-    g.add_node(op=TileOp(name="k_residual"), inputs=["y_ws"], output=Tensor("y__cut", (4,), "f32"), node_id="y__cut")
-    g.outputs = ["y__cut"]
+    g.add_node(op=InputOp(), inputs=[], output=Tensor(input_id, (4,), "f32"), node_id=input_id)
+    ws, cut = f"y_ws{suffix}", f"y__cut{suffix}"
+    g.add_node(op=TileOp(name=f"k_ws{suffix}"), inputs=[input_id], output=Tensor(ws, (4,), "f32"), node_id=ws)
+    g.add_node(op=TileOp(name=f"k_residual{suffix}"), inputs=[ws], output=Tensor(cut, (4,), "f32"), node_id=cut)
+    g.outputs = [cut]
     return g
 
 
-def _composed_route_pipeline(refused: set[int]) -> Pipeline:
-    """Pass 0 is the kernel-set fork at ``y``: two fused rows (``BN=8, 16``) beside the composed
-    route. Pass 1 schedules each piece (``BN=8, 16``). Pass 2 materializes every row except the
-    residual root's ``refused`` ones, which it declines with a rejecting skip — the kernel
-    binder's projection-ownership refusal."""
+def _composed_route_pipeline(refused: dict[str, set[int]], *, rows: tuple[int, ...] = (8, 16), cut_residual: bool = False) -> Pipeline:
+    """Pass 0 is the kernel-set fork at ``k_test`` (and, with ``cut_residual``, again at the residual
+    ``k_residual`` — the piece's own cut): the fused ``rows`` beside the composed route. Pass 1
+    schedules each piece over ``rows``. Pass 2 materializes every row except the ``refused`` ones
+    per kernel name, which it declines with a rejecting skip — the kernel binder's
+    projection-ownership refusal. Pass 3 is the kernel-stage policy stamp: a decided knob lands on
+    every node still un-lowered, exactly as ``LOOPIFY`` does on the production terminal."""
     from dataclasses import replace
 
     from emmy.compiler.pipeline.fork import OptionFork
     from emmy.compiler.pipeline.pipeline import RuleSkipped
 
     def cut(root):
-        if root.op.name != "k_test" or "BN" in root.op.knobs:
-            raise RuleSkipped("not the kernel-set fork")
-        fused = [OptionFork(option=TileOp(name="k_test", knobs={"BN": bn}), knobs={"BN": bn}) for bn in (8, 16)]
-        return [*fused, OptionFork(option=_composed_fragment())]
+        if "BN" in root.op.knobs:
+            raise RuleSkipped("already scheduled")
+        if root.op.name == "k_test":
+            fragment, seam = _composed_fragment("x", ""), "PLACE@seam"
+        elif root.op.name == "k_residual" and cut_residual:
+            fragment, seam = _composed_fragment("y_ws", "2"), "PLACE@seam.1"
+        else:
+            raise RuleSkipped("not a kernel-set fork")
+        fused = [OptionFork(option=TileOp(name=root.op.name, knobs={"BN": bn}), knobs={"BN": bn}) for bn in rows]
+        return [*fused, OptionFork(option=fragment, knobs={seam: "cut"})]
 
     def schedule(root):
         if "BN" in root.op.knobs:
             raise RuleSkipped("already scheduled")
-        return [OptionFork(option=replace(root.op, knobs={"BN": bn}), knobs={"BN": bn}) for bn in (8, 16)]
+        return [OptionFork(option=replace(root.op, knobs={"BN": bn}), knobs={"BN": bn}) for bn in rows]
 
     def materialize(root):
         bn = root.op.knobs["BN"]
-        if root.op.name == "k_residual" and bn in refused:
+        if bn in refused.get(root.op.name, ()):
             raise RuleSkipped("kernel binder refuses this row's projection ownership", reject=True)
         return KernelOp(body=[Smem(name="buf", extents=(64,), dtype="float")], name=root.op.name, knobs={"BN": bn})
 
+    def stamp(root):
+        if "LOOPIFY" in root.op.knobs:
+            raise RuleSkipped("already stamped")
+        return replace(root.op, knobs={**root.op.knobs, "LOOPIFY": 0})
+
     passes = []
-    for i, (name, fn) in enumerate((("__cut__", cut), ("__schedule__", schedule), ("__materialize__", materialize))):
+    for i, (name, fn) in enumerate((("__cut__", cut), ("__schedule__", schedule), ("__materialize__", materialize), ("__stamp__", stamp))):
         rule = Rule(name=name, pattern=[Pattern(name="root", op_type=TileOp)], rewrite=fn, param_names=("root",))
         rule.pass_ = Pass(name=name, rules=[rule], index=i)
         passes.append(rule.pass_)
@@ -457,26 +475,45 @@ def _composed_route_pipeline(refused: set[int]) -> Pipeline:
 
 
 def _elect_composed_route(monkeypatch) -> None:
-    """The prior ranks ``BN=16`` first; the composed route prices below the fused side."""
+    """The prior ranks the widest ``BN`` first; every composed route prices below its fused side,
+    and the fused root is disqualified (``inf`` — every measured variant of it failed)."""
     import emmy.compiler.pipeline.search.policy.greedy as greedy_mod
 
     monkeypatch.setattr(greedy_mod, "_load_prior_safe", lambda: _BiggestBNFirstPrior())
     monkeypatch.setattr(greedy_mod, "_price_graph", lambda *_: 1.0)
-    monkeypatch.setattr(greedy_mod, "_price_op_leaf", lambda *_: 10.0)
+    monkeypatch.setattr(greedy_mod, "_price_op_leaf", lambda fp, *_: float("inf") if fp.root_op.name == "k_test" else 10.0)
 
 
-def test_refused_piece_row_reranks_within_the_composed_route(monkeypatch):
+def _kernels(terminal: Graph) -> dict[str, tuple[str, int]]:
+    return {nid: (n.op.name, n.op.knobs["BN"]) for nid, n in terminal.nodes.items() if isinstance(n.op, KernelOp)}
+
+
+def test_refused_piece_rows_rerank_within_the_composed_route(monkeypatch):
+    # The consumer's first two rows are refused; the third binds. Two retries, both re-ranking the
+    # same piece, and the route never surrenders to the fused root.
     _elect_composed_route(monkeypatch)
-    terminal = _composed_route_pipeline(refused={16}).run(_graph_with_tile(), ctx=_small_smem_ctx())
-    residual, ws = terminal.nodes["y"].op, terminal.nodes["y_ws"].op
-    assert isinstance(residual, KernelOp) and residual.name == "k_residual", "the composed route survives one refused row"
-    assert residual.knobs["BN"] == 8, "the refused piece re-ranks onto its next row"
-    assert isinstance(ws, KernelOp) and ws.knobs["BN"] == 16, "the other piece keeps its pick"
+    pipeline = _composed_route_pipeline({"k_residual": {24, 16}}, rows=(8, 16, 24))
+    terminal = pipeline.run(_graph_with_tile(), ctx=_small_smem_ctx())
+    assert _kernels(terminal) == {"y_ws": ("k_ws", 24), "y": ("k_residual", 8)}, "the refused piece re-ranks onto its third row"
+
+
+def test_exhausted_piece_retires_only_its_own_cut(monkeypatch, caplog):
+    # Every row of the residual's own residual piece is refused: the cut that minted it is retired
+    # at its fork and re-priced, while the root's cut — an evidence decision — stays. Retirement
+    # is logged loudly with the rejection reason.
+    import logging
+
+    _elect_composed_route(monkeypatch)
+    pipeline = _composed_route_pipeline({"k_residual2": {8, 16}}, cut_residual=True)
+    with caplog.at_level(logging.WARNING, logger="emmy.compiler.pipeline"):
+        terminal = pipeline.run(_graph_with_tile(), ctx=_small_smem_ctx())
+    assert _kernels(terminal) == {"y_ws": ("k_ws", 16), "y": ("k_residual", 16)}, "the residual keeps fused; the root's cut survives"
+    assert any("retir" in r.message and "projection ownership" in r.message for r in caplog.records if r.levelno == logging.WARNING)
 
 
 def test_structural_pick_is_revisited_only_when_no_piece_row_binds(monkeypatch):
+    # With no row of the residual binding and no cut of its own, the cut that minted it is the
+    # root's — the fused root is the one resolution left, disqualified or not.
     _elect_composed_route(monkeypatch)
-    terminal = _composed_route_pipeline(refused={8, 16}).run(_graph_with_tile(), ctx=_small_smem_ctx())
-    fused = terminal.nodes["y"].op
-    assert isinstance(fused, KernelOp) and fused.name == "k_test", "every row refused → the fused route is the fallback"
-    assert "y_ws" not in terminal.nodes
+    terminal = _composed_route_pipeline({"k_residual": {8, 16}}).run(_graph_with_tile(), ctx=_small_smem_ctx())
+    assert _kernels(terminal) == {"y": ("k_test", 16)}, "every row refused → the fused route is the fallback"

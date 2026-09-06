@@ -63,6 +63,7 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Callable
+from dataclasses import replace
 from functools import lru_cache
 from typing import TYPE_CHECKING, NamedTuple
 
@@ -917,22 +918,21 @@ def greedy_decide(
     structural pricing probe reads a kernel's cost off the partition fork's
     trace entry).
 
-    ``blocked`` (``{node_id: {tile_identity, ...}}``) lists tiles that failed
-    ``validate(ctx)`` on a previous compile attempt — ``Pipeline.run`` retries
-    the deterministic resolution with the failed leaf blocklisted so the next
-    best non-blocked leaf is picked (the analogue of how ``tune``
-    benches-and-skips an unviable tile; greedy benches nothing, so the
-    validity signal must come from the retry).
+    ``blocked`` (``{node_id: {tile_identity, ...}}``) lists the picks a previous compile
+    attempt made at a node that then failed to lower — a leaf's knob row, or a splice's
+    decision knobs — and ``Pipeline.run`` retries the deterministic resolution with them
+    blocklisted so the next best non-blocked leaf is picked, or the fork re-prices without
+    the withdrawn splice (the analogue of how ``tune`` benches-and-skips an unviable tile;
+    greedy benches nothing, so the validity signal must come from the retry).
 
     Structural (``Graph``-splicing) options are priced against the fused side
     with the same evidence — :func:`_priced_pick` — because a ``Graph`` leaf
     carries no knob row the ordinary ranking could score; when a leaf cannot
     be priced, all of them go on to that ranking anyway. Nothing withholds a
     structural leaf to keep a kernel set unchanged.
-    ``price_structural=False`` withdraws the splices for reasons that are not
-    about speed — ``Pipeline.run``'s retry after a structural pick failed to
-    LOWER, and the nested pricing probes, which must not re-split the slice
-    they are pricing. The price memo is per-factory-call (one compile
+    ``price_structural=False`` withdraws the splices for a reason that is not
+    about speed — the nested pricing probes must not re-split the slice they
+    are pricing. The price memo is per-factory-call (one compile
     attempt), keyed by ``identity_key(with_io=True, with_knobs=True)``."""
     from emmy.compiler.pipeline.pipeline import _is_structural_option  # noqa: PLC0415
 
@@ -956,6 +956,21 @@ def greedy_decide(
         return (db_state[0].ok if db_state[0] is not None else None) or {}
 
     def decide(fp: ForkPoint) -> object:
+        # A retired cut: a splice whose decision identity the strategy blocklisted at this node
+        # (the same identity its trace entry carries) is withdrawn, and the fork re-prices over
+        # what remains — the one structural pick retired, every other arm still on the ballot.
+        node_blocked = blocked.get(fp.node_id) if blocked else None
+        if not node_blocked or not fp.splices:
+            return pick(fp)
+        from emmy.compiler.pipeline.pipeline import _choice_knobs  # noqa: PLC0415
+
+        live = [o for o in fp.options if not (_is_structural_option(o) and tile_identity(_choice_knobs(o, o, fp.root_op)) in node_blocked)]
+        narrowed = replace(fp, options=live)
+        chosen = pick(narrowed)
+        fp.score = narrowed.score
+        return chosen
+
+    def pick(fp: ForkPoint) -> object:
         nonlocal loaded, the_prior
         from emmy.compiler.pipeline.knob import canonical_row_key  # noqa: PLC0415
 
@@ -1016,11 +1031,9 @@ def greedy_decide(
         node_blocked = blocked.get(fp.node_id) if blocked else None
         splices, plain = fp.splices, fp.variants
         if splices and not price_structural:
-            # Structural RETIREMENT, not a ranking rule: a fragment kernel that failed to lower
-            # cannot be blocklisted at the fork site (the splice minted fresh node ids), so
-            # ``Pipeline.run`` re-resolves with the splices withdrawn — the same role ``blocked``
-            # plays for a tile. It also stops a nested price probe from re-splitting the slice it
-            # is pricing. All-splice forks keep their options (the old ``or leaves`` fallback).
+            # A nested price probe must not re-split the slice it is pricing: the splices are
+            # withdrawn, not ranked. All-splice forks keep their options (the old ``or leaves``
+            # fallback).
             splices, plain = (), plain or fp.options
         streamed = _stream_tiers(fp, the_prior, node_blocked, db_index(), options=plain) if plain else None
         if streamed is not None:
@@ -1075,12 +1088,7 @@ def greedy_decide(
         # never reaches a decide.
         if any(_is_structural_option(o) for o in leaves):
             if not price_structural:
-                # Structural RETIREMENT, not a ranking rule: a fragment kernel
-                # that failed to lower cannot be blocklisted at the fork site
-                # (the splice minted fresh node ids), so ``Pipeline.run``
-                # re-resolves with the splices withdrawn — the same role
-                # ``blocked`` plays for a tile. It is also what stops a nested
-                # price probe from re-splitting the slice it is pricing.
+                # A nested price probe must not re-split the slice it is pricing.
                 leaves = [o for o in leaves if not _is_structural_option(o)] or leaves
             else:
                 _require_evidence(fp, "no measured row spells a kernel-set arm")

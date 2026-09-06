@@ -1291,7 +1291,8 @@ backend). It short-circuits from the `perf` cache in three cases. A kernel whose
 slice it is in — its identity is its rendered source and launch geometry, the same bytes wherever it appears — so
 one such row decides the slice as `bench_fail`, blamed exactly as recorded, and the other kernels need no row of
 their own (an all-or-nothing lookup re-benched every hang on every fresh session, because a failure is recorded only
-against the kernel the watchdog named and the innocent kernels stay rowless). A failure that names no kernel in a
+against the kernel the watchdog named and the innocent kernels stay rowless — `persist_bench_failure`, the one
+writer for a failed bench, which `run --bench`'s greedy row also comes through). A failure that names no kernel in a
 multi-kernel terminal — a wall kill — blames none of them, but what IS known, that this kernel set failed at that
 budget, is filed as a `bench_fail` under the set's own key (`TerminalBench.set_key`, the digest of its kernels'
 variant keys) and replays for that exact set; the row carries no knobs and no kernel stands behind it, so the

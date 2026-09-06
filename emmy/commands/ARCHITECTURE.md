@@ -265,7 +265,12 @@ the tune DB by default at tune-standard measurement quality: per-kernel `perf` r
 the deploy evidence the next `compile` / `run` / `serve` picks from, which is how a replayed golden or a hand-pinned
 `--ab` row becomes what the compiler chooses — and node-store leaves for the offline prior's training data. An
 embedded golden lowers in-process, knobs and all, so it records like a traced model; only the `--ir` JSON path, whose
-serialization drops the knobs, stays unrecorded. `--no-record-nodes` opts out of both.
+serialization drops the knobs, stays unrecorded. A greedy row that fails to bench is recorded the same way the
+tuner records a hung terminal (`bench_record.record_bench_failure`, the tuner's `persist_bench_failure`): the kernel
+the watchdog named — or a one-kernel graph's only kernel — earns a `bench_fail` perf row at the run budget's fail
+sentinel and the innocent kernels earn none, so the next compile disqualifies that arm instead of electing the same
+route and hanging again; a failure that names no kernel records nothing, and a compile-budget overrun measured
+nothing and records nothing. `--no-record-nodes` opts out of all of it.
 
 For a fair hybrid-vs-MCTS comparison, both working files start from the same inventory-only trace: do not copy verified
 knob rows into either baseline as proposals. Canonical goldens remain the common implicit deploy context for both runs.

@@ -733,3 +733,87 @@ def test_run_records_the_greedy_pick_of_an_embedded_golden(monkeypatch, tmp_path
         {"emmy_us": pytest.approx((i + 1) * 1.0), "reference_us": pytest.approx((i + 1) * 2.0), "reference_backend": "same-input-greedy"}
         for i in range(len(receipts))
     ]
+
+
+def test_run_files_a_hung_greedy_kernel_as_bench_fail_evidence(monkeypatch, tmp_path):
+    """A greedy pick that hangs the watchdog is evidence too: the kernel the watchdog NAMED earns
+    a ``bench_fail`` perf row in the tune DB and no other kernel does, the same narrowing the
+    tuner's terminal bench applies — so the next compile's evidence pick disqualifies that arm
+    instead of electing the identical route and hanging again. Before, a hung greedy on an
+    embedded golden recorded nothing (the run exited on the missing same-input reference before
+    any recording ran), so ``run --bench`` could never advance an election on its own."""
+    from emmy.commands import run as run_module
+    from emmy.commands.compile import resolve_golden_arg
+    from emmy.compiler import target as target_mod
+    from emmy.compiler.backend.cuda.program import BenchWorkerJobError
+    from emmy.compiler.pipeline.search.db import SearchDB
+
+    db_path = tmp_path / "autotune.db"
+    monkeypatch.setenv("EMMY_TUNE_DB", str(db_path))
+    monkeypatch.setenv("EMMY_NVCC_FLAGS", "")  # the deployable regime: perf evidence is recorded only there
+    path = tmp_path / "working-route.yaml"
+    _working_placement_route(path)
+    args = _args(
+        path,
+        realization="working.route",
+        ir=None,
+        bench=True,
+        ab=None,
+        debug=False,
+        dump_dir=None,
+        bench_backends="emmy",
+        warmup=5,
+        iters=20,
+        seed=0,
+        json=None,
+        profile=False,
+        record=False,
+        record_greedy=True,
+        strict_correctness=False,
+    )
+    resolve_golden_arg(args)
+    seen = {}
+
+    class FakeBackend:
+        name = "cuda"
+        tune_db = None
+        bench_compile_timeout_s = 1.0
+        bench_run_timeout_s = 2.0
+
+        def __init__(self, **_kwargs):
+            pass
+
+        async def benchmark_compare_async(self, graph, **_kwargs):
+            seen["nodes"] = run_module._launch_order_cuda_nodes(graph)
+            culprit = seen["nodes"][-1].op.kernel_name
+            hang = f"kernel '{culprit} (iter 0)' did not complete within 60000 ms — variant marked bench_fail"
+            raise BenchWorkerJobError(f'bench worker error: HungKernelError("{hang}")')
+
+        async def aclose_async_worker(self):
+            pass
+
+    class FakeDump:
+        @staticmethod
+        def resolve(_path):
+            return None
+
+    monkeypatch.setattr(run_module, "_print_kernel_stats", lambda *_args, **_kwargs: None)
+    target_mod.set_target((8, 9))
+    try:
+        with pytest.raises(SystemExit):
+            run_module._handle_run_ir(args, FakeBackend, FakeDump)
+        context_key = Context.probe().structural_key()
+    finally:
+        target_mod.set_target(None)
+
+    nodes = seen["nodes"]
+    assert len(nodes) >= 2, "the route must hold an innocent kernel beside the culprit"
+    db = SearchDB(db_path)
+    try:
+        keys = {n.op.kernel_name: n.op.identity_key(with_io=True, with_knobs=True) for n in nodes}
+        rows = {name: db.lookup_perf(context_key, key, backend="cuda") for name, key in keys.items()}
+    finally:
+        db.close()
+    filed = {name: row.status for name, row in rows.items() if row is not None}
+    assert filed == {nodes[-1].op.kernel_name: "bench_fail"}, "only the kernel the watchdog named is evidence"
+    assert rows[nodes[-1].op.kernel_name].stats.median == pytest.approx(2.0e6), "priced at the run budget's fail sentinel"

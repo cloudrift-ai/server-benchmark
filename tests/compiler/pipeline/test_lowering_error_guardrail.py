@@ -32,6 +32,7 @@ from emmy.compiler.ir.kernel.ir import KernelOp, Smem
 from emmy.compiler.ir.tile.ir import TileOp
 from emmy.compiler.pipeline import LoweringError
 from emmy.compiler.pipeline.pipeline import Pass, Pattern, Pipeline, Rule
+from emmy.compiler.pipeline.search.policy.terminal_bench import point_stats
 from emmy.compiler.pipeline.search.strategy.greedy import _raise_on_unlowered
 from tests.compiler.helpers import drain_tune
 
@@ -182,9 +183,7 @@ def test_unlowered_terminal_is_bench_fail_despite_cached_residual_kernel():
     g.outputs = ["z"]
     db = SearchDB()
     b = _terminal_bench(g, backend=_StubBackend(), db=db)
-    db.record_perf(
-        b.context_key, cuda.identity_key(with_io=True, with_knobs=True), backend="cuda", status="ok", stats=b._point_stats(104.0)
-    )
+    db.record_perf(b.context_key, cuda.identity_key(with_io=True, with_knobs=True), backend="cuda", status="ok", stats=point_stats(104.0))
     kind, (stats, status) = b.prelude()
     assert kind == "done"
     assert status == "bench_fail"

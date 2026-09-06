@@ -405,6 +405,7 @@ def _handle_run_once(args):
                 # Worker SIGKILL (hung kernel), in-child bench budget, EOF — the greedy
                 # pick failing to bench is a *finding*: record it, keep going.
                 greedy_fail = f"greedy run/bench failed: {exc}"
+                _record_greedy_failure(args, backend, compiled, exc)
             else:
                 results, bench, captured = resp["results"], resp["result"], resp["captured"]
                 accuracy_error, ab_ref = resp["accuracy_error"], resp["run_io"]
@@ -649,6 +650,27 @@ def _recordable_bench_leaves(golden_benches, greedy_iso) -> list:
         elif gb.status == "bench_fail":
             leaves += bench_leaves(gb.graph, None, status="bench_fail")
     return leaves
+
+
+def _record_greedy_failure(args, backend, graph, exc) -> None:
+    """A greedy pick that failed to bench is evidence too (``--no-record-nodes`` opts out): the
+    kernel the watchdog named earns its ``bench_fail`` perf row at the run budget's fail sentinel,
+    exactly as the tuner files a hung terminal, so the next ``compile`` / ``run`` / ``serve``
+    disqualifies that arm instead of electing the same route and hanging again. Recorded only in
+    the deployable regime, for the same reason :func:`_record_bench_evidence` gates its perf rows."""
+    if getattr(args, "no_record_nodes", False):
+        return
+    from emmy.commands.compile import resolve_tune_db  # noqa: PLC0415
+    from emmy.compiler.context import Context  # noqa: PLC0415
+    from emmy.compiler.pipeline.search.bench_record import record_bench_failure  # noqa: PLC0415
+
+    ctx = Context.probe()
+    if float(ctx.features().get("H_opt", 3.0)) != 3.0:
+        return
+    db_path = resolve_tune_db()
+    blamed = record_bench_failure(db_path, ctx, graph, exc, float(backend.bench_run_timeout_s) * 1_000_000.0)
+    if blamed:
+        print(f"[record-nodes] bench_fail perf row(s) for {', '.join(blamed)} recorded into {db_path} — opt out with --no-record-nodes")
 
 
 def _record_bench_evidence(args, golden_benches, greedy_iso) -> None:
@@ -2389,6 +2411,7 @@ def _handle_run_ir(args, CudaBackend, CompilerDump):
                 )
             except RuntimeError as exc:
                 greedy_fail = f"greedy run/bench failed: {exc}"
+                _record_greedy_failure(args, backend, graph, exc)
             else:
                 results, bench, captured = resp["results"], resp["result"], resp["captured"]
                 torch_available, accuracy_error = resp["torch_available"], resp["accuracy_error"]

@@ -27,6 +27,7 @@ from emmy.compiler.ir.frontend.ir import LinearOp
 from emmy.compiler.ir.stmt.body import free_names
 from emmy.compiler.ir.tensor.ir import ElementwiseOp
 from emmy.compiler.pipeline import KERNEL_PASSES, Pipeline
+from emmy.compiler.pipeline.search.pins import pinned_knobs
 from emmy.compiler.target import set_target
 
 _CAP = (12, 0)
@@ -36,7 +37,7 @@ _K, _N_Q, _N_KV = 64, 64, 32  # q's N differs from k/v's — the second output a
 
 def _qkv_graph() -> Graph:
     """The fused projection shape: one shared computed operand feeding three linears, q wider than
-    k/v. Fusion makes it ONE kernel whose grid carries both output extents."""
+    k/v. Under a pinned fuse this is ONE kernel whose grid carries both output extents."""
     graph = Graph()
     graph.add_node(InputOp(), [], Tensor("x", (_TOKENS, _K), dtype=F32), node_id="x")
     for weight, n in (("wq", _N_Q), ("wk", _N_KV), ("wv", _N_KV)):
@@ -51,14 +52,23 @@ def _qkv_graph() -> Graph:
 
 
 def test_a_sibling_outputs_grid_axis_stays_bound() -> None:
+    """The oracle is about the FUSED kernel, so the fused arm is pinned rather than assumed.
+
+    Both placement arms are well formed on this shape. Fused, one kernel carries every output
+    extent, and the untiled one has to stay a declared axis — the fact this test is about. Cut, the
+    q branch and the k/v branch each own their outputs and become a kernel binding its own extent
+    on the grid (the output-owning cut: no axis rides all three stores, so the fused kernel promotes
+    no sweep and keeps a one-axis placement, while each piece promotes its own). Both lower and
+    validate; the pin selects the one whose body the oracle reads."""
     set_target(_CAP)
     try:
-        lowered = Pipeline.build(KERNEL_PASSES).run(_qkv_graph(), ctx=Context(compute_capability=_CAP))
+        with pinned_knobs({"PLACE": "fuse"}):
+            lowered = Pipeline.build(KERNEL_PASSES).run(_qkv_graph(), ctx=Context(compute_capability=_CAP))
     finally:
         set_target(None)
     kernels = [node for node in lowered.nodes.values() if getattr(node.op, "body", None) is not None]
 
-    assert len(kernels) == 1, "the three projections must fuse into one kernel for this shape to arise"
+    assert len(kernels) == 1, "the pinned fuse arm must give this shape one kernel for the untiled axis to arise"
     node = kernels[0]
     bound = {*node.inputs, *node.buffer_names(), *_TOKENS.expr.free_vars()}
     free = set().union(*(free_names(stmt) for stmt in node.op.body))

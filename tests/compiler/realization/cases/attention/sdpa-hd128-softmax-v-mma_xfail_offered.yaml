@@ -45,7 +45,7 @@ configs:
       STAGE: d1/smem
       LOOPIFY: '0'
       RASTER: ''
-    identity: 68a89a444151dbfc7cdbd025b5fe7129e94f9a56ed38c05efd3ff5741f6d966b
+    identity: eb74b174290bc40763cc4c842e3039516584a3fcf05f5703071e81c20e19d04e
   - name: k_sdpa_6a2bfa.0015e9065043.448a0d722d09
     bindings: {}
     pins:
@@ -70,6 +70,24 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 42f4ac2f45ef1f6aba545a62a12b4888e71f8101e29afb45ebb4af4219d222eb
+  - name: k_sdpa_6a2bfa.0015e9065043.eb74b174290b
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs: {}
+    identity: eb74b174290bc40763cc4c842e3039516584a3fcf05f5703071e81c20e19d04e
+  - name: k_sdpa_6a2bfa.0015e9065043.fb05568f956b
+    bindings: {}
+    pins:
+      FAST_MATH: true
+    knobs:
+      REDUCE@map.1/twist: ''
+      REDUCE@map.1/twist.1/map.1/inner: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: fb05568f956bc5f3686693caa643bd929543fbeb156ffeaf808ca4ee2c4f2748
 loops:
 - inputs: [x0, x1, x2]
   outputs: [scaled_dot_product_attention]

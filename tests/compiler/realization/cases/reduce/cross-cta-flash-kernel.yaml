@@ -32,7 +32,7 @@ configs:
       PLACE: fuse
     knobs:
       REDUCE: g2k
-    identity: ffcf1b275637588147945438ab958311d3ce8bab817c70bcd7e83660a062f619
+    identity: 2e40dced853112eb65f9137b4b380b20bfdc6884d262441e4a35e381b6f1858a
     latency:
       NVIDIA GeForce RTX 5090:
         emmy_us: 22.498559951782227
@@ -112,3 +112,24 @@ configs:
       STAGE: ''
       RASTER: ''
     identity: 75c2793357838caef7114aa8e83911c2184a6f4248e734b346f060d70b57979d
+  - name: k_sdpa_fbd178.50222a02272c.1006fd017f81
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      REDUCE@twist: ''
+      REDUCE@twist.1/map.1/inner: ''
+      WORK: ''
+      TILE: ''
+      STAGE: ''
+      RASTER: ''
+    identity: 1006fd017f8155be78f84a0b4d255382535e48007fca8d1b791feef1c46b56cd
+  - name: k_sdpa_fbd178.50222a02272c.8d7d8cf4973e
+    bindings: {}
+    pins:
+      FAST_MATH: false
+    knobs:
+      WORK: ''
+      REDUCE: ''
+      RASTER: ''
+    identity: 8d7d8cf4973ead77bea989c4b792b5226db77d473d96889199c8de8816781df3

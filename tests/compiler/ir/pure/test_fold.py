@@ -22,8 +22,8 @@ from emmy.compiler.dim import Dim
 from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Fold, Lambda
-from emmy.compiler.ir.pure.twist import SOFTMAX
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Loop, OutputSpec, Write
+from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Loop, OutputSpec, Write
 from tests.compiler.terms import contraction, reduction, slab
 
 M_AXIS, N_AXIS, K_AXIS = Axis("m", Dim(8)), Axis("n", Dim(4)), Axis("k", Dim(16))
@@ -234,12 +234,14 @@ def test_an_observed_store_rides_the_reduce_loop_after_the_observer() -> None:
 
 
 def _twisted(states: tuple[str, str] = ("m", "l")) -> Fold:
-    """The exp-family ``(m, l)`` carrier: the softmax recipe named on a ``(score, 1)`` singleton, so
-    ``combine`` derives as the recipe's stable conjugate of the ``(maximum, add)`` base."""
-    body = Body((Assign(name="s", op="copy", args=("y",)), Const(name="one", value=1.0)))
-    lift = Lambda.closing(("k", "y"), body, ("s", "one"))
+    """The exp-family ``(m, l)`` carrier in the BASE frame: the lift contributes ``(score, exp(score))``
+    to the ``(maximum, add)`` base monoid, and naming the softmax recipe is what derives both the
+    stable ⊕ and the ψ-image ``(score, 1)`` that the step actually folds."""
+    body = Body((Assign(name="s", op="copy", args=("y",)), Assign(name="e", op="exp", args=("s",))))
+    lift = Lambda.closing(("k", "y"), body, ("s", "e"))
     base = Lambda.componentwise(SOFTMAX.base[:2], states)
-    return Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), base=base, twist=SOFTMAX)
+    twist = Twist(recipe=SOFTMAX, roles=(("s", "s"),), channels=(0,))
+    return Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), base=base, twist=twist)
 
 
 def test_a_twisted_state_spelling_never_reaches_the_canonical_form() -> None:
@@ -298,9 +300,12 @@ def test_the_step_is_the_merge_at_the_injected_singleton() -> None:
     """One derivation: the serial step applies the same program at the lift's results, its
     ``Accum`` forms folding over the reduce axis, after the lift body."""
     fold = _twisted()
-    step, merged = fold.step(), fold.merge(fold.lift.results)
-    assert tuple(step[: len(fold.lift.body)]) == tuple(fold.lift.body)
-    assert tuple(step[len(fold.lift.body) :]) == tuple(replace(s, axes=("k",)) if isinstance(s, Accum) else s for s in merged)
+    injected = fold.injected
+    assert injected.results == ("s", "l__one"), "psi takes the base singleton (score, exp score) to (score, 1)"
+    assert "e" not in {stmt.name for stmt in injected.body}, "nothing may see through psi: exp(score) overflows"
+    step, merged = fold.step(), fold.merge(injected.results)
+    assert tuple(step[: len(injected.body)]) == tuple(injected.body)
+    assert tuple(step[len(injected.body) :]) == tuple(replace(s, axes=("k",)) if isinstance(s, Accum) else s for s in merged)
 
 
 # --- the memo ------------------------------------------------------------------------------------ #

@@ -60,14 +60,16 @@ def _twisted(code: str) -> Fold:
 
 
 def test_softmax_rewrites_to_twisted_pair() -> None:
-    """The row maximum and the exp-weighted sum fuse into one ``(m, l)`` carrier injecting
-    ``(score, 1)``, the score slab its one operand."""
+    """The row maximum and the exp-weighted sum fuse into one ``(m, l)`` carrier over the BASE
+    monoid: the lift contributes ``(score, exp(score))`` off the score slab, and ψ takes that
+    singleton to ``(score, 1)`` for the step to fold."""
     fold = _twisted("torch.softmax(torch.randn(4, 8, dtype=torch.float16), dim=-1)")
 
-    assert fold.combine == SOFTMAX.program(fold.as_reduction().states)
+    assert fold.twist.recipe is SOFTMAX and fold.combine == SOFTMAX.program(fold.as_reduction().states)
     assert len(fold.init) == 2 and fold.init[1] == 0.0
-    assert [edge.as_slab() is not None for edge in fold.operands] == [True]
-    assert any(isinstance(stmt, Const) and stmt.value == 1.0 for stmt in fold.lift.body)
+    assert [edge.as_slab() is not None for edge in fold.operands] == [True], "the score slab is its one operand"
+    assert [stmt.op.name for stmt in fold.lift.body] == ["exp"], "the base contribution is (score, exp score)"
+    assert any(isinstance(stmt, Const) and stmt.value == 1.0 for stmt in fold.injected.body), "psi injects 1"
 
 
 def test_sdpa_rewrites_to_twisted_expectation() -> None:
@@ -109,9 +111,8 @@ def test_sdpa_score_contraction_reaches_the_mma_tier() -> None:
         "torch.randn(1, 1, 32, 16, dtype=torch.float16))"
     )
     lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
-    (source,) = (node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp))
-    assert "acc3__one" not in source or True  # the carrier lowers; what the tier picked is the schedule's
-    assert "__float2half" in source
+    sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
+    assert sources and all("__float2half" in source for source in sources)
 
 
 # ===================================================================
@@ -172,9 +173,13 @@ def test_welford_variance_pair_fuses_into_one_carrier() -> None:
     assert view.states == ("acc0", "acc1__n", "acc1__mean", "acc1")
     assert fold.combine.alpha_eq(WELFORD.program(view.states))
     assert fold.init == (0.0, 0.0, 0.0, 0.0)
-    score, one, mean, zero = fold.lift.results
+    score, one, mean, square = fold.lift.results
     consts = {stmt.name: stmt.value for stmt in fold.lift.body if isinstance(stmt, Const)}
-    assert mean == score and consts[one] == 1.0 and consts[zero] == 0.0, "the singleton is (x, 1, x, 0)"
+    products = {stmt.name: stmt.args for stmt in fold.lift.body if isinstance(stmt, Assign) and stmt.op.name == "multiply"}
+    assert mean == score and consts[one] == 1.0, "the base contribution is (x, 1, x, x*x)"
+    assert products[square] == (score, score), "channel 3 squares one edge, so it is no contraction"
+    injected = {stmt.name: stmt.value for stmt in fold.injected.body if isinstance(stmt, Const)}
+    assert injected[fold.injected.results[3]] == 0.0, "psi takes it to 0 — a lone element deviates from its own mean by nothing"
     lowered = fold.lower(axes=axes)
     (loop,) = [stmt for stmt in lowered if isinstance(stmt, Loop)]  # ``1/N`` is hoisted ahead of it
     defined = {loop.axis.name, "a0", *view.states, *(name for stmt in lowered for name in stmt.defines())}

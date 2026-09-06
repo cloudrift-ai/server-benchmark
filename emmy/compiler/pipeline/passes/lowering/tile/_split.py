@@ -37,6 +37,7 @@ from emmy.compiler.ir.base import InputOp
 from emmy.compiler.ir.expr import BinaryExpr, Literal, Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
+from emmy.compiler.ir.pure.twist import Twist
 from emmy.compiler.ir.schedule import Reduce, Work
 from emmy.compiler.ir.schedule.catalog import splitk_moves
 from emmy.compiler.ir.sigma import Sigma
@@ -414,7 +415,9 @@ def _state_fold(axis: Axis, algebra: Fold, loads: tuple[Load, ...]) -> Fold:
         lift=Lambda(params=(axis.name, *values), body=Body(), results=values),
         init=algebra.init,
         base=algebra.base,
-        twist=algebra.twist,
+        # The SAME ⊕ the partials were produced under — but over finished carrier states read out
+        # of the workspace, so ψ has already been applied to every one of them.
+        twist=None if algebra.twist is None else Twist.merging(algebra.twist),
     )
 
 

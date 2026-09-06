@@ -18,8 +18,8 @@ from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure import Lambda
 from emmy.compiler.ir.pure.fold import Fold
-from emmy.compiler.ir.pure.twist import SOFTMAX
-from emmy.compiler.ir.stmt import Accum, Assign, Body, Const, Load, Loop, Write
+from emmy.compiler.ir.pure.twist import SOFTMAX, Twist
+from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, Write
 from emmy.compiler.ir.stmt.passes import rewrite
 from emmy.compiler.ir.tile import OutputSpec, extract_output_specs, observed_result_names
 from emmy.compiler.pipeline.passes.lowering.tile._fromloop import fold_from_loop, lift_loop_op, scan_from_loop
@@ -83,10 +83,11 @@ def test_exp_family_declines_an_observer() -> None:
     names = ("m_i", "l_i")
     lift = Lambda(
         params=("k",),
-        body=Body((Load(name="s0", input="s", index=(Var("k"),)), Const(name="one", value=1.0))),
-        results=("s0", "one"),
+        body=Body((Load(name="s0", input="s", index=(Var("k"),)), Assign(name="e", op="exp", args=("s0",)))),
+        results=("s0", "e"),
     )
-    fold = Fold(lift=lift, init=(float("-inf"), 0.0), base=Lambda.componentwise(SOFTMAX.base[:2], names), twist=SOFTMAX)
+    twist = Twist(recipe=SOFTMAX, roles=(("s", "s0"),), channels=(0,))
+    fold = Fold(lift=lift, init=(float("-inf"), 0.0), base=Lambda.componentwise(SOFTMAX.base[:2], names), twist=twist)
     observe = Lambda(params=("k", *names), body=Body((Assign(name="m__obs", op="copy", args=("m_i",)),)), results=("m__obs",))
     with pytest.raises(AssertionError, match="does not support a per-step observer"):
         dataclasses.replace(fold, observe=observe)

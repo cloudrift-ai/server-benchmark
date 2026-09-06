@@ -517,8 +517,11 @@ without a placement or value-cut analysis.
 `020_twisted` is a separate algebraic rewrite over the canonical tree. It fuses every reduce that reads a reduce
 into the twisted monoid a recipe recognizes (`Fold.fuse` — the pivot's state is the operand binding, the score the
 sub-cone alpha-equal to the pivot's own map, the rest a channel's pattern by canonical form), hoisting factors
-constant along the axis out of the fold first. Softmax, SDPA, and causal SDPA differ only in carrier arity and
-score/value lambdas; there is no operation-family matcher. `040_schedule` enumerates the complete
+constant along the axis out of the fold first. The fused fold stores the recipe's BASE contribution as its lift and
+names the recipe in its `twist`, so the stable ⊕ and the ψ-image the step folds are both derived rather than baked in;
+a channel whose base contribution is a product gets the other factor's cone as an operand of its own, which is what
+leaves attention's expectation channel spelled as one monomial over two operand edges. Softmax, SDPA, and causal SDPA
+differ only in carrier arity and score/value lambdas; there is no operation-family matcher. `040_schedule` enumerates the complete
 rewritten tree. Direct contraction children and independent roots use the same physical-axis compatibility join, even
 when roots reverse their algebraic M/N readings. A derived contraction uses the enclosing Fold domain through the same
 parent/child interface. Materialization binds accepted choices to placed geometry and resolved transport facts;

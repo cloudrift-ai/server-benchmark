@@ -106,7 +106,7 @@ def _head(node, ctx: _Ctx) -> str:
     else:
         kind = "contraction" if node.as_contraction() is not None else "reduce"
         span = _axis_span(ctx.tile.axis_of(node.axis)) if ctx.tile is not None else node.axis
-        text = f"Fold[{span}] {kind}"
+        text = f"Fold[{span}] {kind}" + (f"  ⟨twist={node.twist.name}⟩" if node.twist is not None else "")
     return text + ctx.note(node)
 
 
@@ -161,7 +161,12 @@ def _items(node, ctx: _Ctx) -> list[tuple[str, object]]:
     # Always emitted, even for an empty body: the branch carries the SIGNATURE, and a node's
     # binder is storage whether or not it computes anything (an identity projection binds too).
     items.append((f"lift: {_lam_sig(node.lift, ctx)}", _stmts(node.lift.body, ctx)))
-    if node.combine is not None:
+    # The ⊕ is STORAGE only as ``base``; the twisted conjugate is derived from it and the recipe
+    # (``combine = psi(psi_inv(x) base psi_inv(y))``), so a twisted node names the recipe in its
+    # header and prints one op per state here instead of the twelve-statement program.
+    if node.twist is not None:
+        items.append((f"base: ({', '.join(op.name for op in node.base.components())})", lambda cont: []))
+    elif node.combine is not None:
         items.append((f"combine: {_lam_sig(node.combine, ctx)}", _stmts(node.combine.body, ctx)))
     if node.observe is not None:
         items.append((f"observe: {_lam_sig(node.observe, ctx)}", _stmts(node.observe.body, ctx)))

@@ -36,7 +36,7 @@ from emmy.compiler.ir.axis import Axis
 from emmy.compiler.ir.elementwise import ElementwiseImpl
 from emmy.compiler.ir.expr import Var
 from emmy.compiler.ir.pure.lam import Lambda
-from emmy.compiler.ir.pure.twist import Recipe
+from emmy.compiler.ir.pure.twist import Recipe, Twist
 from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Assign, Body, Load, Loop, OutputSpec, Stmt, StridedLoop
 from emmy.compiler.ir.stmt.body import free_names
@@ -193,12 +193,13 @@ class Fold:
     # op per carried component, and its RESULTS are the carrier's state names. ``None`` at zero
     # axes, where there is no monoid at all.
     base: Lambda | None = field(kw_only=True, default=None)
-    # The :class:`~emmy.compiler.ir.pure.twist.Recipe` this carrier instantiates, or ``None`` for a
-    # planar fold. It supplies the bijection ``psi`` onto the stable carrier and the certified
-    # stable spelling of the conjugate ``combine(x, y) = psi(psi_inv(x) base psi_inv(y))``, which
-    # :attr:`combine` derives. NAMED rather than restated: stability is not preserved by
-    # conjugation, so the stable program cannot be computed from ``psi`` and ``base``.
-    twist: Recipe | None = field(kw_only=True, default=None)
+    # The recipe this carrier INSTANTIATES — the schema plus this term's spelling of its roles
+    # (:class:`~emmy.compiler.ir.pure.twist.Twist`) — or ``None`` for a planar fold. It supplies
+    # the bijection ``psi`` onto the stable carrier, and with it the two halves the term does not
+    # store: ``combine(x, y) = psi(psi_inv(x) base psi_inv(y))`` (:attr:`combine`) and
+    # ``psi ∘ lift``, the singleton that ⊕ folds (:attr:`injected`). NAMED rather than restated:
+    # stability is not preserved by conjugation, so neither can be computed from ``psi`` alone.
+    twist: Twist | None = field(kw_only=True, default=None)
     # The per-step OBSERVER — the scan spelling: a pure λ(k, s₁…sₙ) over the carried state,
     # evaluated AFTER iteration k's combine (inclusive; exclusive is an init/index shift, never a
     # stored flag), binding the iteration var then the state positionally. Its results are FRESH
@@ -355,6 +356,19 @@ class Fold:
         """
         return self.lift.rename({param: edge.exposes[index] for param, edge, index in self.bindings})
 
+    @cached_property
+    def read_operands(self) -> tuple[Fold, ...]:
+        """The operands the term's rendered statements actually READ — what :meth:`lower` places.
+
+        Every operand is a SITE the schedule may take, and a twisted carrier's weight cone is one
+        the serial nest has no use for: ψ folds each element against the running pivot, so the
+        absolute ``exp(score)`` the contraction channel multiplies is never evaluated there.
+        Placing it anyway would emit a transcendental per element for nothing. An edge whose value
+        this term passes through (a wrapper's operand, named among :attr:`exposes`) is read.
+        """
+        seen = set(self.step().ssa_uses) | set(self.exposes)
+        return tuple(edge for edge in self.operands if not seen.isdisjoint(edge.exposes))
+
     def binds_axes(self) -> frozenset[str]:
         """The axis this term binds — what the statement-door ``rewrite`` drops from σ for the subtree."""
         return frozenset() if self.axis is None else frozenset({self.axis})
@@ -372,6 +386,26 @@ class Fold:
         if self.base is None or self.twist is None:
             return self.base
         return self.twist.program(self.base.results)
+
+    @cached_property
+    def injected(self) -> Lambda:
+        """The lift SEEN THROUGH ψ — ``injected = psi ∘ lift``, the singleton the ⊕ folds, in the
+        operands' spelling. ``applied`` itself for a planar fold, where ψ is the identity.
+
+        For a twisted one the stored ``lift`` computes the BASE contribution, which is what makes a
+        channel read as a contraction and what a schedule tiles; it is NOT what a serial step may
+        emit, because ``Sum exp(score)`` overflows. So the step folds this instead: the score's own
+        cone, then the recipe's authored injections (:meth:`Twist.inject`) — the simplified form ψ
+        takes where the pivot IS the score. Nothing else may see through ψ.
+        """
+        applied = self.applied
+        if self.twist is None or not self.twist.roles:
+            return applied  # planar, or a merge whose elements are carrier states already
+        spelled = dict(zip(self.lift.params, applied.params, strict=True))
+        roles = tuple((role, spelled.get(name, name)) for role, name in self.twist.roles)
+        injection = self.twist.inject(roles, self.base.results)
+        score = injection.results[0]
+        return Lambda(params=applied.params, body=Body((*applied.cone(score).body, *injection.body)), results=injection.results)
 
     @property
     def axis(self) -> str | None:
@@ -481,7 +515,7 @@ class Fold:
             axis=self.axis,
             states=states,
             other=self.combine.params[len(states) :],
-            terms=self.applied.results,
+            terms=self.injected.results,
             ops=self.combine.components(),
         )
 
@@ -548,15 +582,16 @@ class Fold:
 
     @cached_method
     def step(self) -> Body:
-        """The per-step statements this fold DERIVES from its stored parameters: the lift body,
-        then the combine applied at the injected singleton (:meth:`merge` at the lift's results,
-        each ``Accum`` folding over the reduce axis), then an observer's pure tap, so a streamed
-        store reads the post-combine (inclusive-prefix) state.
+        """The per-step statements this fold DERIVES from its stored parameters: the lift body
+        SEEN THROUGH ψ (:attr:`injected` — the lift itself for a planar fold), then the combine
+        applied at that injected singleton (:meth:`merge` at its results, each ``Accum`` folding
+        over the reduce axis), then an observer's pure tap, so a streamed store reads the
+        post-combine (inclusive-prefix) state.
 
         Without a combine the term is a map and the step is the lift body. Deterministic from the
         stored parameters, so kernel identity depends on no classified view. Memoized on the term.
         """
-        lift = self.applied
+        lift = self.injected
         if self.combine is None:
             return lift.body
         merged = [replace(stmt, axes=(self.axis,)) if isinstance(stmt, Accum) else stmt for stmt in self.merge(lift.results)]
@@ -588,7 +623,7 @@ class Fold:
             if pview.ops is not None:
                 if len(pview.states) != 1 or pview.ops[0].reduce_canon != recipe.pivot:
                     continue
-            elif pivot.twist is not recipe:
+            elif pivot.twist is None or pivot.twist.recipe is not recipe:
                 continue  # a twisted pivot must already carry THIS recipe: another one's carrier is not its pivot
             if axes[self.axis].extent != axes[pivot.axis].extent or axes[self.axis].window != axes[pivot.axis].window:
                 continue
@@ -666,37 +701,57 @@ class Fold:
                     )
                     for edge in extra_edges
                 )
-            operands = (*pivot.operands, *extra_edges)
-            # The carrier's states: the pivot's, then every channel in recipe order — the matched one
-            # is this fold's own state, one without a pattern a state the recipe adds; each injection
-            # instantiated at the score, its temps namespaced on the state it feeds.
+            # The carrier's states: the pivot's, then every channel in recipe order — the matched
+            # one is this fold's own state, one without a pattern a state the recipe adds. Each
+            # takes the recipe's BASE contribution for it (``lift``'s own result), instantiated at
+            # the score and this channel's extras: the term stores what the recipe declares, and ψ
+            # is applied at lowering (:attr:`injected`). The SEEDS stay the carrier's — the state
+            # is the stable one, only the per-element contribution is the base's.
             state = view.states[0]
             score = pivot.lift.results[0]
-            injections = [
-                (state, channel.injection, self.init[0], recipe.base[1 + index])
-                if c is channel
-                else (f"{state}__{c.name}", c.injection, c.init, recipe.base[1 + index])
+            added = [
+                (state if c is channel else f"{state}__{c.name}", index, self.init[0] if c is channel else c.init)
                 for index, c in enumerate(recipe.channels)
                 if c is channel or c.pattern is None
             ]
-            roles = dict(zip(channel.pattern.params[2:], extras, strict=True))  # the channel's extras, by role
-            body, results, inits = list(pivot.lift.body), list(pivot.lift.results), list(pivot.init)
-            for name, injection, init, _ in injections:
-                names = {injection.params[0]: score, **{param: roles[param] for param in injection.params[1:]}}
-                names.update((stmt.name, f"{name}__{stmt.name}") for stmt in injection.body)
-                instance = injection.rename(names)
-                body.extend(instance.body)
-                results.extend(instance.results)
-                inits.append(init)
+            roles = {recipe.lift.params[0]: score, **dict(zip(channel.pattern.params[2:], extras, strict=True))}
             arity = sum(len(edge.exposes) for edge in pivot.operands)
+            held = [
+                *zip(pivot.operands, _slots(pivot.lift.params[1 : 1 + arity], pivot.operands), strict=True),
+                *zip(extra_edges, _slots(extra_params, extra_edges), strict=True),
+            ]
+            body, results, inits = list(pivot.lift.body), list(pivot.lift.results), list(pivot.init)
+            for name, index, init in added:
+                taken = {n for stmt in body for n in stmt.defines()} | {p for _, slot in held for p in slot}
+                cone = recipe.lift.cone(recipe.lift.results[1 + index])
+                names = {param: roles[param] for param in cone.params}
+                names.update((stmt.name, stmt.name if stmt.name not in taken else f"{name}__{stmt.name}") for stmt in cone.body)
+                instance = cone.rename(names)
+                body.extend(instance.body)
+                results.append(instance.results[0])
+                inits.append(init)
+            results = _factor_weights(body, results, held, len(pivot.lift.results))
             lift = Lambda(
-                params=(pivot.axis, *pivot.lift.params[1 : 1 + arity], *extra_params, *pivot.lift.params[1 + arity :]),
-                body=Body(body),
+                params=(pivot.axis, *(p for _, slot in held for p in slot), *pivot.lift.params[1 + arity :]),
+                body=Body(tuple(Body(tuple(body)).backward_cone(tuple(dict.fromkeys(results))).members)),
                 results=tuple(results),
             )
-            states = (*pview.states, *(name for name, _, _, _ in injections))
-            ops = (*pivot.base.components(), *(op for _, _, _, op in injections))
-            return Fold(operands=operands, lift=lift, init=tuple(inits), base=Lambda.componentwise(ops, states), twist=recipe)
+            states = (*pview.states, *(name for name, _, _ in added))
+            ops = (*pivot.base.components(), *(recipe.base[1 + index] for _, index, _ in added))
+            carried = () if pivot.twist is None else pivot.twist.channels
+            bindings = dict(() if pivot.twist is None else pivot.twist.roles)
+            twist = Twist(
+                recipe=recipe,
+                roles=tuple({**bindings, **{role: name for role, name in roles.items()}}.items()),
+                channels=(*carried, *(index for _, index, _ in added)),
+            )
+            return Fold(
+                operands=tuple(edge for edge, _ in held),
+                lift=lift,
+                init=tuple(inits),
+                base=Lambda.componentwise(ops, states),
+                twist=twist,
+            )
         return None
 
     @cached_method
@@ -738,6 +793,8 @@ class Fold:
             operands=tuple(edge.canonical() for edge in self.operands),
             lift=self.lift.rename(mapping),
             base=base,
+            # The role binding is names of THIS term, so it renames in lockstep like every other.
+            twist=None if self.twist is None else replace(self.twist, roles=_renamed_roles(self.twist.roles, lambda n: mapping.get(n, n))),
             # The observer binds the iteration var and reads the carried state, so it renames in
             # LOCKSTEP: renaming the axis without it leaves the observer reading a name that no
             # longer exists, and a scan would then canonicalize to something that is not a term.
@@ -813,6 +870,15 @@ class Fold:
                     origin.update((name, (id(term), "observed")) for name in term.observe.results)
             pending.extend(reversed(term.operands))
         owned: dict[tuple[int, str], list[OutputSpec]] = {}
+
+        def placed(term: Fold) -> tuple[Fold, ...]:
+            # An operand is placed when the term READS it, or when the tree below it defines a
+            # value the kernel STORES — a nested output sweep is materialized for its own store,
+            # not for its reader. Everything else is a site the schedule may take and the nest has
+            # no use for (:attr:`read_operands`).
+            kept = {id(edge) for edge in term.read_operands}
+            return tuple(edge for edge in term.operands if id(edge) in kept or _writes_under(edge, writing))
+
         for spec in stores:
             key = origin.get(spec.write.values[0])
             assert key is not None and all(origin.get(name) == key for name in spec.write.values), (
@@ -869,7 +935,7 @@ class Fold:
                 scope, stmts, loops = frozenset(bound) | set(node), None, []
             if term.axis is None:
                 step = term.step()
-                for edge in term.operands:
+                for edge in placed(term):
                     place(edge, loops, node if step else path)
                 if step:
                     target = stmts if stmts is not None else sink(node)
@@ -877,7 +943,7 @@ class Fold:
                     attach(term, "step", target, node, scope)
                 return
             inner: list[Stmt] = []
-            for edge in term.operands:
+            for edge in placed(term):
                 place(edge, [*loops, (term.axis, scope | {term.axis}, inner)], node)
             inner.extend(term.step())
             attach(term, "observed", inner, node, scope | {term.axis})
@@ -894,6 +960,7 @@ class Fold:
                     body.append(Loop(axis=coordinates[name], body=assemble((*path, name))))
             return _scope(body)
 
+        writing = {term for term, _ in owned}
         place(self, [], None)
         return assemble(())
 
@@ -953,6 +1020,7 @@ def _(s: Fold, rename, sigma, axis_fn):
         results=tuple(rename(r) for r in s.lift.results),
     )
     base = s.base.rename(rename) if s.base is not None else None
+    twist = None if s.twist is None else replace(s.twist, roles=_renamed_roles(s.twist.roles, rename))
     observe = None
     if s.observe is not None:
         # The observer renames in lockstep: param 0 tracks the axis, the state params track the
@@ -962,7 +1030,94 @@ def _(s: Fold, rename, sigma, axis_fn):
             body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.observe.body)),
             results=tuple(rename(r) for r in s.observe.results),
         )
-    return replace(s, operands=operands, lift=lift, base=base, observe=observe)
+    return replace(s, operands=operands, lift=lift, base=base, twist=twist, observe=observe)
+
+
+def _writes_under(term: Fold, writing: set[int]) -> bool:
+    """Whether any term of ``term``'s subtree defines a value the kernel's boundary stores."""
+    pending, seen = [term], set()
+    while pending:
+        node = pending.pop()
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if id(node) in writing:
+            return True
+        pending.extend(node.operands)
+    return False
+
+
+def _slots(params: tuple[str, ...], edges) -> list[tuple[str, ...]]:
+    """``params`` cut into one group per edge — the positional binding, one param per result component."""
+    out, cursor = [], 0
+    for edge in edges:
+        out.append(tuple(params[cursor : cursor + len(edge.exposes)]))
+        cursor += len(edge.exposes)
+    return out
+
+
+def _factor_weights(body: list[Stmt], results: list[str], held: list[tuple[Fold, tuple[str, ...]]], start: int) -> list[str]:
+    """Make every factor of a channel's PRODUCT an operand, so the channel reads as a contraction.
+
+    A twisted carrier's expectation channel contributes ``weight ⊗ value`` — one monomial, but the
+    weight is a cone over the score, so as it stands the product multiplies a body definition by an
+    operand and no bilinear reading applies. Hoisting that cone out as its own zero-axis operand is
+    what the semiring formation already does for a matmul's decoded A, and it leaves the channel a
+    bare product of two operand edges. A channel whose whole contribution IS that cone (the
+    denominator, ``Sum exp(score)``) then finds it already held and binds it rather than computing a
+    second copy, which is why one score node serves the whole carrier.
+
+    Only the results from ``start`` on are the channels this fusion added; the ones before them are
+    the pivot's own, already factored when it was built. ``body`` and ``held`` are extended in
+    place; the new result names are returned.
+    """
+    bound = {param for _, slot in held for param in slot}
+
+    def operand(name: str, *, create: bool) -> str:
+        # ``name``'s closed cone as an operand — the param of an equal edge already held, or, with
+        # ``create``, a fresh zero-axis term appended under the cone's own result name. Either way
+        # the statement defining it leaves the lift: it is the operand's program now, not the step's.
+        members = tuple(Body(tuple(body)).backward_cone((name,)).members)
+        reads = {n for stmt in members for n in stmt.deps()} - {n for stmt in members for n in stmt.defines()}
+        inner = [(edge, slot) for edge, slot in held if not reads.isdisjoint(slot)]
+        cone = Fold(
+            operands=tuple(edge for edge, _ in inner),
+            lift=Lambda.closing(tuple(param for _, slot in inner for param in slot), Body(members), (name,)),
+        )
+        for edge, slot in held:
+            if edge.canonical() == cone.canonical():
+                body[:] = [stmt for stmt in body if name not in stmt.defines()]
+                return slot[0]
+        if not create:
+            return name
+        body[:] = [stmt for stmt in body if name not in stmt.defines()]
+        held.append((cone, (name,)))
+        return name
+
+    definitions = {stmt.name: stmt for stmt in body}
+    out = list(results)
+    for position, result in enumerate(out[start:], start):
+        product = None if result in bound else definitions.get(result)
+        if product is None:
+            continue
+        if isinstance(product, Assign) and len(product.args) == 2:
+            # A factor that is itself a carried contribution stays in the lift: Welford's ``x·x``
+            # multiplies the pivot's own value by itself, which is one edge and no contraction.
+            free = [arg for arg in product.args if arg in definitions and arg not in out]
+            if not free:
+                continue
+            renamed = {arg: operand(arg, create=True) for arg in free}
+            body[body.index(product)] = replace(product, args=tuple(renamed.get(arg, arg) for arg in product.args))
+            continue
+        # Not a product: the whole contribution may still BE a cone another channel already holds.
+        out[position] = operand(result, create=False)
+    return out
+
+
+def _renamed_roles(roles: tuple[tuple[str, str], ...], rename) -> tuple[tuple[str, str], ...]:
+    """A twist's role binding under one renamer — the recipe's role name is the SCHEMA's and never
+    renames; the term's own name for it does, like every other name the term binds."""
+    return tuple((role, rename(name)) for role, name in roles)
 
 
 __all__ = [

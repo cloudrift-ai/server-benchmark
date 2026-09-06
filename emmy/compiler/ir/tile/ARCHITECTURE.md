@@ -208,7 +208,17 @@ The rewrite consumes the canonical Fold tree. It reuses the registered monoid ge
 and scoped score equivalence both for sibling maximum/additive folds and for the equivalent canonical composition in
 which contraction normalization has placed those statistics inside a computed normalized-exponential operand.
 Normalization factors remain in the projection epilogue, while a directly loaded expectation value becomes a Fold
-operand; the generic twisted Fold derivation then exposes the corresponding contraction to scheduling.
+operand.
+
+What the fused fold STORES is the recipe's own vocabulary: the BASE monoid's per-element contribution as its `lift`,
+that monoid's componentwise ⊕ as its `base`, and the recipe itself — bound to this term's roles — as its `twist`. Both
+halves the term does not store follow from that pair: the stable ⊕ (`Fold.combine`) and the ψ-image of the lift
+(`Fold.injected`), which is the singleton the serial step actually folds. Storing the base is what leaves attention's
+expectation channel spelled as `weight ⊗ value` in the term rather than buried in a rescale program, and the weight's
+cone becomes an operand of its own, so the channel is a bare product of two operand edges. Nothing may see through ψ:
+the base form denotes `Sum exp(score)`, so the step reads the recipe's authored per-channel injections instead of
+evaluating ψ on it, and an operand no rendered statement reads — the weight cone, on the serial nest — is not placed
+at all.
 
 ## Kernel identity
 

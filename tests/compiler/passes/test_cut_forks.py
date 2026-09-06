@@ -297,9 +297,10 @@ def test_recorded_sdpa_cut_decodes_exactly_and_stale_path_fails_loudly() -> None
 @requires_cuda
 def test_softmax_state_cut_is_offered_and_pinned_cut_lowers() -> None:
     offered = _offered(_softmax_graph(), frontend=True)
-    # The carrier is the one cuttable seam, spelled by its route beside the epilogue map sites.
+    # Two cuttable seams, each spelled by its route: the carrier itself, and the epilogue map that
+    # reciprocates its denominator (whose workspace dtype the base contribution's ``exp`` settles).
     assert {"PLACE": "fuse"} in offered and {"PLACE@map.1/map.1/twist": "cut"} in offered
-    lowered = _lower_cut(_softmax_graph(), "PLACE")
+    lowered = _lower_cut(_softmax_graph(), "PLACE@map.1/map.1/twist")
     cuda = [node for node in lowered.nodes.values() if type(node.op).__name__ == "CudaOp"]
     assert len(cuda) == 2
     assert len(next(node for node in cuda if "__place_" in node.id).outputs) == 2  # maximum + denominator state

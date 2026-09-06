@@ -86,7 +86,7 @@ def test_exp_family_declines_an_observer() -> None:
         body=Body((Load(name="s0", input="s", index=(Var("k"),)), Assign(name="e", op="exp", args=("s0",)))),
         results=("s0", "e"),
     )
-    twist = Twist(recipe=SOFTMAX, roles=(("s", "s0"),), channels=(0,))
+    twist = Twist(recipe=SOFTMAX, channels=(0,))
     fold = Fold(lift=lift, init=(float("-inf"), 0.0), base=Lambda.componentwise(SOFTMAX.base[:2], names), twist=twist)
     observe = Lambda(params=("k", *names), body=Body((Assign(name="m__obs", op="copy", args=("m_i",)),)), results=("m__obs",))
     with pytest.raises(AssertionError, match="does not support a per-step observer"):

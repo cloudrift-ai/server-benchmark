@@ -240,7 +240,7 @@ def _twisted(states: tuple[str, str] = ("m", "l")) -> Fold:
     body = Body((Assign(name="s", op="copy", args=("y",)), Assign(name="e", op="exp", args=("s",))))
     lift = Lambda.closing(("k", "y"), body, ("s", "e"))
     base = Lambda.componentwise(SOFTMAX.base[:2], states)
-    twist = Twist(recipe=SOFTMAX, roles=(("s", "s"),), channels=(0,))
+    twist = Twist(recipe=SOFTMAX, channels=(0,))
     return Fold(operands=(slab("y", "y", "m", "k"),), lift=lift, init=(-1e30, 0.0), base=base, twist=twist)
 
 

@@ -399,13 +399,34 @@ class Fold:
         takes where the pivot IS the score. Nothing else may see through ψ.
         """
         applied = self.applied
-        if self.twist is None or not self.twist.roles:
+        if self.twist is None or not self.twist.channels:
             return applied  # planar, or a merge whose elements are carrier states already
-        spelled = dict(zip(self.lift.params, applied.params, strict=True))
-        roles = tuple((role, spelled.get(name, name)) for role, name in self.twist.roles)
-        injection = self.twist.inject(roles, self.base.results)
+        injection = self.twist.inject(self.roles, self.base.results)
         score = injection.results[0]
         return Lambda(params=applied.params, body=Body((*applied.cone(score).body, *injection.body)), results=injection.results)
+
+    @cached_property
+    def roles(self) -> tuple[str, ...]:
+        """This term's spelling of the recipe's roles — ``(score, *extras)``, positionally against
+        ``Recipe.lift``'s params. DERIVED, so the recipe a fold names carries no name of its own and
+        renames with nothing.
+
+        The SCORE is the pivot channel's contribution, which is what every recipe's role vector
+        leads with. An EXTRA is an operand component a channel reads that the score's own edge does
+        not supply — attention's streamed value, read beside the weight cone that carries the score,
+        which is why formation hoists the two into one edge. A role the term never bound (Welford's
+        ``1/N``, whose base contribution does not read it) is simply absent from the tail.
+        """
+        bound = {param: (edge, index) for param, edge, index in self.bindings}
+        supplies = bound.get(self.lift.results[0], (None, 0))[0]
+        extras: list[str] = []
+        for result in self.lift.results[1:]:
+            for param in self.lift.cone(result).params:
+                edge, index = bound.get(param, (None, 0))
+                if edge is None or edge is supplies or edge.exposes[index] in extras:
+                    continue
+                extras.append(edge.exposes[index])
+        return (self.applied.results[0], *extras)
 
     @property
     def axis(self) -> str | None:
@@ -748,12 +769,7 @@ class Fold:
             states = (*pview.states, *(name for name, _, _ in added))
             ops = (*pivot.base.components(), *(recipe.base[1 + index] for _, index, _ in added))
             carried = () if pivot.twist is None else pivot.twist.channels
-            bindings = dict(() if pivot.twist is None else pivot.twist.roles)
-            twist = Twist(
-                recipe=recipe,
-                roles=tuple({**bindings, **{role: name for role, name in roles.items()}}.items()),
-                channels=(*carried, *(index for _, index, _ in added)),
-            )
+            twist = Twist(recipe=recipe, channels=(*carried, *(index for _, index, _ in added)))
             return Fold(
                 operands=tuple(edge for edge, _ in held),
                 lift=lift,
@@ -802,8 +818,6 @@ class Fold:
             operands=tuple(edge.canonical() for edge in self.operands),
             lift=self.lift.rename(mapping),
             base=base,
-            # The role binding is names of THIS term, so it renames in lockstep like every other.
-            twist=None if self.twist is None else replace(self.twist, roles=_renamed_roles(self.twist.roles, lambda n: mapping.get(n, n))),
             # The observer binds the iteration var and reads the carried state, so it renames in
             # LOCKSTEP: renaming the axis without it leaves the observer reading a name that no
             # longer exists, and a scan would then canonicalize to something that is not a term.
@@ -1029,7 +1043,6 @@ def _(s: Fold, rename, sigma, axis_fn):
         results=tuple(rename(r) for r in s.lift.results),
     )
     base = s.base.rename(rename) if s.base is not None else None
-    twist = None if s.twist is None else replace(s.twist, roles=_renamed_roles(s.twist.roles, rename))
     observe = None
     if s.observe is not None:
         # The observer renames in lockstep: param 0 tracks the axis, the state params track the
@@ -1039,7 +1052,7 @@ def _(s: Fold, rename, sigma, axis_fn):
             body=Body(tuple(_rewrite(st, rename, sigma, axis_fn) for st in s.observe.body)),
             results=tuple(rename(r) for r in s.observe.results),
         )
-    return replace(s, operands=operands, lift=lift, base=base, twist=twist, observe=observe)
+    return replace(s, operands=operands, lift=lift, base=base, observe=observe)
 
 
 def _writes_under(term: Fold, writing: set[int]) -> bool:
@@ -1133,12 +1146,6 @@ def _factor_weights(body: list[Stmt], results: list[str], held: list[tuple[Fold,
         streamed = next((index for index, (_, slot) in enumerate(held) if index and not set(slot).isdisjoint(product.args)), None)
         if streamed is not None:
             held.insert(1, held.pop(streamed))  # B second, so the pair reads off the operands in order
-
-
-def _renamed_roles(roles: tuple[tuple[str, str], ...], rename) -> tuple[tuple[str, str], ...]:
-    """A twist's role binding under one renamer — the recipe's role name is the SCHEMA's and never
-    renames; the term's own name for it does, like every other name the term binds."""
-    return tuple((role, rename(name)) for role, name in roles)
 
 
 __all__ = [

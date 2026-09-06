@@ -416,8 +416,8 @@ def _state_fold(axis: Axis, algebra: Fold, loads: tuple[Load, ...]) -> Fold:
         init=algebra.init,
         base=algebra.base,
         # The SAME ⊕ the partials were produced under — but over finished carrier states read out
-        # of the workspace, so ψ has already been applied to every one of them.
-        twist=None if algebra.twist is None else Twist.merging(algebra.twist),
+        # of the workspace, so there is no per-element contribution left for ψ to be applied to.
+        twist=None if algebra.twist is None else Twist(recipe=algebra.twist.recipe, channels=()),
     )
 
 

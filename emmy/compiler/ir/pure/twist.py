@@ -55,31 +55,24 @@ class Channel:
 
 @dataclass(frozen=True)
 class Twist:
-    """One :class:`Recipe` INSTANTIATED on a term — the schema, plus what this term calls the
-    recipe's roles and which channel each of its carried states is.
+    """One :class:`Recipe` INSTANTIATED on a term — the schema, plus which channel each of the
+    term's carried states is.
 
     A recipe states its algebra over ROLE names: ``lift``'s params are ``(score, *extras)``, and
-    every channel's ``pattern`` and ``injection`` bind those same roles. ``roles`` pairs each role
-    the term bound with the term's own name for it, and ``channels`` says which recipe channel each
-    carried state past the pivot is — the carrier grows one state per fusion, so its order is the
-    order the tree was fused in and not the recipe's.
+    every channel's ``pattern`` and ``injection`` binds those same roles. What a TERM calls each of
+    them is read off the term (``Fold.roles``), never stored, so this holds no name and renames
+    with nothing. ``channels`` says which recipe channel each carried state past the pivot is — the
+    carrier grows one state per fusion, so its order is the order the tree was fused in and not the
+    recipe's — and it is what lets a fold DERIVE both halves it does not store: the stable ⊕
+    (:meth:`program`) and the ψ-image of its own lift (:meth:`inject`).
 
-    Together they are what lets a :class:`~emmy.compiler.ir.pure.fold.Fold` DERIVE the two halves it
-    does not store: the stable ⊕ (:meth:`program`) and the ψ-image of its own lift (:meth:`inject`).
-
-    EMPTY ``roles`` says the term's elements are already carrier states, so ψ has nothing to do:
-    a cross-CTA split's partial merge (:func:`_state_fold`) folds finished partials read out of a
-    workspace, and it names the recipe only to reach the same ⊕ they were produced under.
+    EMPTY ``channels`` says the term folds no per-element contribution at all: a cross-CTA split's
+    partial merge reads finished carrier states out of a workspace, so ψ has already been applied to
+    every one of them and it names the recipe only to reach the same ⊕ they were produced under.
     """
 
     recipe: Recipe
-    roles: tuple[tuple[str, str], ...]
     channels: tuple[int, ...]
-
-    @classmethod
-    def merging(cls, twist: Twist) -> Twist:
-        """The same ⊕ over values that are already carrier states — no per-element roles to bind."""
-        return cls(recipe=twist.recipe, roles=(), channels=())
 
     @property
     def name(self) -> str:
@@ -90,9 +83,11 @@ class Twist:
         spelling the recipe authored (:meth:`Recipe.program`)."""
         return self.recipe.program(states)
 
-    def inject(self, roles: tuple[tuple[str, str], ...], states: tuple[str, ...]) -> Lambda:
+    def inject(self, roles: tuple[str, ...], states: tuple[str, ...]) -> Lambda:
         """``psi ∘ lift`` at the singleton — the score, then one channel injection per carried state
-        past the pivot — over ``roles``, this term's spelling of the recipe's.
+        past the pivot — over ``roles``, this term's spelling of ``Recipe.lift``'s params in order.
+        A role the term never bound is simply absent from the tail, and an injection that reads one
+        raises rather than guessing.
 
         Written out by the recipe's AUTHORED injections rather than by evaluating ``psi`` on the
         base contribution: at the singleton the pivot IS the score, so ``psi`` divides each channel
@@ -100,9 +95,9 @@ class Twist:
         the two apart denotes ``exp(s)`` and overflows. That simplification is exactly what a
         channel's ``injection`` states, so lowering reads it instead of computing it.
         """
-        spelled = dict(roles)
+        spelled = dict(zip(self.recipe.lift.params, roles, strict=False))  # a role the term never bound stays absent
         body: list[Stmt] = []
-        results = [spelled[self.recipe.lift.params[0]]]
+        results = [roles[0]]
         for state, index in zip(states[1:], self.channels, strict=True):
             injection = self.recipe.channels[index].injection
             names = {param: spelled[param] for param in injection.params}
@@ -110,7 +105,7 @@ class Twist:
             instance = injection.rename(names)
             body.extend(instance.body)
             results.extend(instance.results)
-        return Lambda(params=tuple(name for _, name in roles), body=Body(tuple(body)), results=tuple(results))
+        return Lambda(params=roles, body=Body(tuple(body)), results=tuple(results))
 
 
 @dataclass(frozen=True)

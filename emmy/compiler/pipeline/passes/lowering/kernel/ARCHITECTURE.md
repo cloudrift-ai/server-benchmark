@@ -100,9 +100,14 @@ to the serial fold; each ILP copy suffixes only its per-copy SSA temps
 (`__r{r}`)
 — the shared iteration coordinates, **including any nested contraction's own reduce-axis var** (whose `for`
 declaration `copy_cell` does not rename), stay shared, so each copy re-declares its own nested
-loop under the one name; anything else tiles nothing and folds serially one thread per
-output cell (the degenerate `op.lower()` + `with_store`) — there is **no** separate "scalar tier" branch, and no
-per-kind emitter: which axis is tiled is schedule data, not a kernel identity. The projection sink and the store value
+loop under the one name; anything else tiles nothing and folds one thread per
+output cell (the degenerate `op.lower()` + `with_store`) — except a kernel whose ONLY work is a free output sweep,
+which distributes that sweep across its `WORK` threads through the same `_lane_close` a cooperating reduce uses for
+its projection: each lane owns a strided slice and writes its own cells, so there is no combine and no store guard.
+That third path is what a placement cut needs — it leaves the reduction in one piece and a bare elementwise map in
+the other, and without it that map runs one thread per row with the sweep serial inside (an RTX 5090 measured 885.9
+us against 4.2 us for the same kernel once the sweep is distributed). There is **no** separate "scalar tier"
+branch, and no per-kind emitter: which axis is tiled is schedule data, not a kernel identity. The projection sink and the store value
 (`out_val`, the root node's produced `Handle`) are threaded down the recursion, so `with_store` is node-agnostic. The
 kernel-boundary `TileOp.output_specs` are reconstituted at the zero-axis Fold peel — an output-tiled root's region
 being its epilogue term over it —

@@ -106,6 +106,11 @@ class Ctx:
     # The placement's FREE axes — the un-shrunk originals. A split partial may prefix ``_ksplit``;
     # contraction views derive their output axes from the trailing pair.
     free: tuple = ()
+    # Threads per output cell for a kernel whose ONLY work is a free output sweep — the ``WORK``
+    # thread width, 1 when the inventory is absent or a warp spec. A contraction reads its worker
+    # split off ``workers`` and a cooperating reduce off its own ``coop``; this is the third case,
+    # where nothing else claims the inventory (see the degenerate arm of :func:`_factorize`).
+    sweep_workers: int = 1
 
 
 def _wire(op: Fold) -> Handle:
@@ -115,6 +120,18 @@ def _wire(op: Fold) -> Handle:
     if op.exposes:
         return Handle(op.exposes[0])
     return _wire(op.operands[0]) if op.operands else Handle("")
+
+
+def _sweep_workers(tile) -> int:
+    """The ``WORK`` thread width available to a free output sweep, or 1.
+
+    Only a kernel with no tiled site and no reduction reaches the sweep arm, so reading the width
+    here costs nothing on every other path: a warp inventory (a contraction's) and a bare direct
+    inventory both answer 1."""
+    from emmy.compiler.ir.schedule import Work  # noqa: PLC0415
+
+    work = Work.parse((tile.knobs or {}).get("WORK", "") or "")
+    return work.units[0] if work.kind == "thread" and work.units[1] == 1 else 1
 
 
 def factorize(tile, root, store=None) -> Tile:
@@ -143,6 +160,7 @@ def factorize(tile, root, store=None) -> Tile:
         # per-node structure) — parse it once here; ``grid_tile`` applies it where the 2-D
         # (m, n) block grid makes it meaningful.
         raster=Raster.parse((tile.knobs or {}).get("RASTER", "")),
+        sweep_workers=_sweep_workers(tile),
     )
     out_val = _wire(op).name if op is not None else ""
     return _factorize(op, ctx, tail=(), out_val=out_val, store=store, output_specs=tuple(tile.output_specs))
@@ -458,7 +476,18 @@ def _bind(op, ctx: Ctx, tail: tuple, out_val: str, store=None, *, output_specs: 
             axes = ctx.sched.tile.axes
             placed = op.lower(frozenset(axis.name for axis in ctx.grid), output_specs, axes) if output_specs else op.lower(axes=axes)
             body = list(dict.fromkeys([*placed, *tail]))
-            state, fold, close, bt = [], with_store(body, ctx.output, grid, out_val), [], None
+            # A kernel whose only work is a FREE output sweep — the elementwise half a placement
+            # cut leaves behind a reduction — distributes that sweep across threads exactly as a
+            # cooperating reduce distributes its projection (:func:`_lane_close`). Each lane owns a
+            # strided slice of the sweep and writes its own cells, so there is nothing to combine
+            # and no store to guard. Without a width the arm stays the one-thread-per-cell fold.
+            width = ctx.sweep_workers
+            if width > 1 and any(isinstance(s, Loop) and not s.is_reduce for s in body):
+                lane = Axis(name="sweep_co", extent=width)
+                state, fold, close, bt = [], _lane_close(body, lane, width, ctx, out_val), [], width
+                t = replace(t, axes=(lane,))
+            else:
+                state, fold, close, bt = [], with_store(body, ctx.output, grid, out_val), [], None
         elif plan.coop_transposed:
             # The ``coop-t`` k-major matvec partition: the innermost output axis splits into a
             # shrunk ``<out>_blk`` grid axis (×32) + the 32-wide ``n_lane`` thread axis (with

@@ -470,6 +470,20 @@ class ClassicMaterialization:
             raise ValueError(f"classic producer band {schedule.kernel.work.producer} disagrees with WarpSpec producer band {producer}")
 
 
+def no_site_claims_inventory(tile_op) -> bool:
+    """Whether this kernel has no node site that could fold out a worker inventory.
+
+    Only a tiled site or a cooperative reduction claims one, so a kernel with neither — a bare
+    elementwise map, the half a placement cut leaves behind a reduction — has a kernel work that no
+    node constrains. :func:`~...classic_projection.project_classic` offers such a kernel the sweep
+    widths, and the two compatibility gates here let them through instead of filtering them back to
+    the direct per-cell form. Read off the tile rather than the projected domains, so validation
+    (which carries none) answers the same.
+    """
+    sites = tile_op.family_sites
+    return not sites["TILE"] and not sites["REDUCE"]
+
+
 @dataclass(frozen=True)
 class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeSchedule]):
     """Immutable classic ``c + p + t`` compatibility-composition state.
@@ -1113,7 +1127,11 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
         ):
             self._refuse("pick is incompatible with the classic kernel position")
         work = self._work or Work()
-        if pick.kernel.work.kind != work.kind or pick.kernel.work.units != work.units:
+        # Same rule as :meth:`_kernel_composes`: a kernel no node constrains takes any inventory
+        # its own domain offers, so a bare elementwise map's output sweep is not left serial.
+        if (pick.kernel.work.kind != work.kind or pick.kernel.work.units != work.units) and not (
+            self._work is None and self._no_site_claims_inventory()
+        ):
             self._refuse("kernel WORK does not realize the node choices")
         if not pick.kernel.raster.is_direct and not self._raster_eligible:
             self._refuse("RASTER requires a tiled contraction site")
@@ -1181,14 +1199,18 @@ class ClassicScheduleContext(ScheduleContext[KernelSchedule, NodeSchedule, EdgeS
             if isinstance(assignment.tile, PlacedTile):
                 self._refuse("node choices cannot contain placed tile geometry", site)
 
+    def _no_site_claims_inventory(self) -> bool:
+        return no_site_claims_inventory(self.tile_op)
+
     def _kernel_composes(self, kernel: KernelSchedule) -> bool:
         work = self._work or Work()
-        return (
-            kernel.work.kind == work.kind
-            and kernel.work.units == work.units
-            and (not kernel.work.producer or self._producer_eligible)
-            and (kernel.raster.is_direct or self._raster_eligible)
+        # A kernel no node constrains takes any inventory its own domain offers: with nothing to
+        # disagree with, holding it to ``Work()`` is not a compatibility rule but the collapse that
+        # leaves an output sweep serial in one worker per cell.
+        agrees = (kernel.work.kind == work.kind and kernel.work.units == work.units) or (
+            self._work is None and self._no_site_claims_inventory()
         )
+        return agrees and (not kernel.work.producer or self._producer_eligible) and (kernel.raster.is_direct or self._raster_eligible)
 
     def _supports_global(self, family: str, value: str) -> bool:
         return any(key.partition("@")[0] == family and value in self.values(key) for key in self.keys())

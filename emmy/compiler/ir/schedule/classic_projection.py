@@ -51,6 +51,7 @@ from emmy.compiler.ir.schedule.classic import (
     _plan_node_refusal,
     _resolve_stage,
     edge_site_spelling,
+    no_site_claims_inventory,
     node_id_spelling,
 )
 from emmy.compiler.ir.schedule.views import ContractionFacts
@@ -432,6 +433,18 @@ def project_classic(tile: TileOp, target) -> ClassicDomains:
             )
             is not None
         )
+    # A kernel whose work IS its shared output sweep — a bare elementwise map, the half a placement
+    # cut leaves behind a reduction — has no site that folds out an inventory, so the loop above
+    # leaves the domain at the direct per-cell form alone: one worker per output cell with the
+    # sweep serial inside it. Offer the widths a cooperative reduction would, so the sweep can be
+    # split across workers (``_factor`` distributes it through ``_lane_close``). This widens the
+    # worker inventory only; the grid stays the cell count, unlike promoting the axis into
+    # ``place.free``, which multiplies the grid by its extent.
+    if no_site_claims_inventory(tile) and tile.output_specs:
+        shared = set.intersection(*({axis.name for axis in store.sweep} for store in tile.output_specs))
+        if shared:
+            widths = sorted({move.coop for move in coop_reduce_moves() if move.coop > 1})
+            work_domain.update(Work(kind="thread", units=(width, 1)) for width in widths)
     raster_values = (
         raster_moves()
         if any(view.as_contraction() is not None for view in tile.views) and all(axis.extent.is_static for axis in tile.place.free)

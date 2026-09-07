@@ -1,5 +1,7 @@
-# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma) — the twist
-# carries P·V inside its carrier on this tree and offers no child contraction site yet; it realized on main.
+# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma). The channel now
+# READS as a contraction and the site is offered; no atom tier folds it yet. Both tiers fold the stored lift straight
+# into their accumulator, and for a twisted carrier that is the BASE contribution — it denotes Sum exp(score) and folds
+# none of the states that are not the bilinear channel — so the row is declined and the greedy falls back.
 compute_cap:
 - 12
 - 0

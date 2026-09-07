@@ -114,7 +114,9 @@ def test_sdpa_score_contraction_reaches_the_mma_tier() -> None:
     )
     lowered = Pipeline.build(CUDA_PASSES).run(graph, ctx=Context.from_target((8, 0)))
     sources = [node.op.kernel_source for node in lowered.nodes.values() if isinstance(node.op, CudaOp)]
-    assert sources and all("__float2half" in source for source in sources)
+    # The kernel that writes the f16 output converts at the boundary. Asked of the FINALIZE, not of
+    # the set: a cross-CTA split's partial keeps the carrier in an f32 workspace and converts nothing.
+    assert sources and "__float2half" in sources[-1]
 
 
 # ===================================================================

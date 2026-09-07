@@ -60,7 +60,7 @@ from emmy.compiler.ir.sigma import Sigma
 from emmy.compiler.ir.stmt import Accum, Body, Cond, Init, Load, Loop, Select, SelectBranch, Stmt, StridedLoop, Write
 from emmy.compiler.ir.tile import FoldMove, Level, Reduce, ReduceStage
 from emmy.compiler.ir.tile.ir import apply_output_specs, observed_result_names
-from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_form, chain_members, projection_regions, projection_root, sched_of
+from emmy.compiler.ir.tile.ops import UnbindableProjection, chain_form, chain_members, projection_regions, sched_of, tiled_edges
 from emmy.compiler.pipeline.passes.lowering.kernel._atom import (
     clamp_last,
     copy_cell,
@@ -176,11 +176,7 @@ def _factorize(op, ctx: Ctx, tail: tuple, out_val: str, store=None, output_specs
     and their enclosing carrier factorize through this same walk."""
     if (isinstance(op, Fold) and op.axis is None) and op.operands:
         # An output-tiled root may sit under its sweep's epilogue projection (``projection_root``).
-        tiled = [
-            edge
-            for edge in op.operands
-            if (root := projection_root(edge)) is not None and root.as_contraction() is not None and ctx.sched.tile_of(root) is not None
-        ]
+        tiled = tiled_edges(op.operands, lambda root: ctx.sched.tile_of(root) is not None)
         if len(tiled) > 1:
             return _bind_roots(op, ctx, output_specs)
         # The peel stops at a projection whose operands are slabs alone: a slab is no site — it
@@ -260,11 +256,7 @@ def _peeled_root(edge, ctx: Ctx):
     peel reaches a slab alone."""
     node = edge
     while isinstance(node, Fold) and node.axis is None and node.operands:
-        tiled = [
-            e
-            for e in node.operands
-            if (r := projection_root(e)) is not None and r.as_contraction() is not None and ctx.sched.tile_of(r) is not None
-        ]
+        tiled = tiled_edges(node.operands, lambda r: ctx.sched.tile_of(r) is not None)
         node = tiled[0] if tiled else next((e for e in node.operands if e.as_slab() is None), None)
     return node
 

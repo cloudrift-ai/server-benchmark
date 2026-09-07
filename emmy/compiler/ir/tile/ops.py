@@ -443,6 +443,23 @@ def projection_root(edge: Fold) -> Fold | None:
     return reducing[0] if len(reducing) == 1 else None
 
 
+def tiled_edges(operands, scheduled=None) -> tuple[Fold, ...]:
+    """The operand edges of one projection whose :func:`projection_root` is a bilinear reduce —
+    ONE edge per distinct root, the first that reaches it, and only roots ``scheduled`` accepts.
+
+    Per ROOT, because a reduce its own epilogue reads back is reached twice through the operands
+    that share it: the carrier itself, and the ``1/l`` projection over it. Counting those as two
+    output-tiled roots asks the binder to give each its own output specification, and a twisted
+    carrier's one output belongs to both."""
+    out: dict[int, Fold] = {}
+    for edge in operands:
+        root = projection_root(edge)
+        if root is None or root.as_contraction() is None or (scheduled is not None and not scheduled(root)):
+            continue
+        out.setdefault(id(root), edge)
+    return tuple(out.values())
+
+
 def projection_regions(op: Fold, output_specs: tuple) -> tuple[tuple[Fold, Fold, Body, tuple], ...]:
     """Partition an independent projection by producing root — ``(root, region, tail, stores)`` per
     operand of ``op``: the reducing root (:func:`projection_root`), the operand term that carries
@@ -510,9 +527,9 @@ def kernel_roots(op) -> tuple[Fold, ...]:
     term alone, so the schedule projection offers the partition catalog only where it is realized."""
     node = op
     while isinstance(node, Fold) and node.axis is None and node.operands:
-        tiled = [root for edge in node.operands if (root := projection_root(edge)) is not None and root.as_contraction() is not None]
+        tiled = tuple(projection_root(edge) for edge in tiled_edges(node.operands))
         if len(tiled) > 1:
-            return tuple(tiled)
+            return tiled
         node = tiled[0] if tiled else node.operands[0]
     return (node,) if isinstance(node, Fold) else ()
 
@@ -643,4 +660,5 @@ __all__ = [
     "projection_tail",
     "reduce_plan",
     "sched_of",
+    "tiled_edges",
 ]

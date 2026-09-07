@@ -1638,9 +1638,13 @@ class _AtomOps:
     @property
     def channels(self) -> tuple:
         """The ``(b, acc)`` pairs this emission folds — the node's product channels (one A
-        fragment, N mma chains, one C fragment per channel at arity N)."""
-        # Each streamed operand paired with the accumulator it feeds — a channel WAS this zip.
-        return tuple(zip(self.c.operands[1:], self.c.combine.results, strict=True))
+        fragment, N mma chains, one C fragment per channel at arity N).
+
+        Read off the ALGEBRA (:meth:`Fold.bilinear_channels`), not off operand order: a twisted
+        carrier streams one value against states that are no product at all, so its accumulator
+        count and its operand count differ."""
+        states = self.c.base.results
+        return tuple((edge, states[index]) for index, edge in self.c.bilinear_channels())
 
     @property
     def cone(self) -> tuple:
@@ -1970,7 +1974,10 @@ class _MmaOps(_AtomOps):
             if not used:
                 from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
 
-                raise RuleSkipped(f"fragment projection for {write.output!r} reads no contraction accumulator")
+                # A REJECTING skip: this is the node's lowering declining the offered row, so the
+                # greedy blocklists it and retries. Without the flag the row wedges the compile —
+                # nothing else lowers the node and the terminal keeps an unlowered ``TileOp``.
+                raise RuleSkipped(f"fragment projection for {write.output!r} reads no contraction accumulator", reject=True)
             primary = used[0]
             extra = tuple((accs[f], frags[f]) for f in used[1:])
             epi = _warp_epilogue([*cone.members, write], accs[primary], m.axis.name, n.axis.name, sigma, extra_accs=extra)
@@ -2123,6 +2130,17 @@ def _atom_ops(
     (the scheduler resolved the fill for exactly this edge; the tree itself is never rewritten)."""
     k_axis = k_axis if k_axis is not None else c.axis  # a scheduled wrapper already carries the resolved axis
     assert isinstance(k_axis, Axis), "the atom needs the contraction's K with its extent — the kernel's axis table names it"
+    if c.twist is not None and c.twist.channels:
+        # NOTHING MAY SEE THROUGH ψ. Both tiers fold the stored ``lift`` — the BASE contribution —
+        # straight into their accumulator, which for a twisted carrier denotes ``Σ exp(score)`` and
+        # overflows, and folds none of the states that are not the bilinear channel. A rejecting
+        # skip, so the greedy blocklists the row and lands on a tier that goes through
+        # :meth:`Fold.step`; the tensor-core form of this carrier is the blocked-fold emitter's.
+        from emmy.compiler.pipeline import RuleSkipped  # noqa: PLC0415 — avoid an import cycle
+
+        raise RuleSkipped(
+            f"the {c.twist.name} carrier's ψ has no atom tier — its base contribution is not what a step may fold", reject=True
+        )
     a_edge = c.operands[0] if c.operands else None
     a_load = a_edge.lift.body[0] if a_edge is not None and a_edge.as_slab() is not None else None
     if (

@@ -1,7 +1,9 @@
-# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma) — the twist
-# carries P·V inside its carrier on this tree and offers no child contraction site yet; it realized on main.
+# evidence: the schedule pins the value channel on tensor cores (the P·V half beside the score's mma). The channel now
+# READS as a contraction and the site is offered; no atom tier folds it yet. Both tiers fold the stored lift straight
+# into their accumulator, and for a twisted carrier that is the BASE contribution — it denotes Sum exp(score) and folds
+# none of the states that are not the bilinear channel — so the row is declined and the greedy falls back.
 # Qwen3-Embedding-0.6B decoder layer 0, kernels 6 and 7: causal GQA attention.
-# hidden=1024 heads=16 kv_heads=8 head_dim=128, fp32, seq 128. One of the twelve layer-0
+# hidden=1024 heads=16 kv_heads=8 head_dim=128, fp32, seq 512. One of the twelve layer-0
 # kernels the perf suite curated before the corpus became its case source.
 #
 # The schedule is SITE-SCOPED (TILE@map.1/twist.1/map.1/inner is the score, TILE@map.1/twist the weighted sum) because a flash
@@ -9,7 +11,7 @@
 # the resolved kernel.
 #
 # evidence: this exact row is one `enumerate_graph` itself emits for this exact program at
-# this exact capability (3090 rows offered unpinned, this among them). Pinning a row back to
+# this exact capability (3108 rows offered unpinned, this among them). Pinning a row back to
 # the enumeration that produced it must be satisfiable by construction; instead the pinned
 # enumeration admits nothing at all and every fork empties. A row the planner offers and then
 # refuses to honour is a pin round-trip defect, not a schedule the compiler is right to
@@ -23,25 +25,25 @@ programs:
   nodes:
   - id: k
     op: input
-    outputs: [[k, f32, [1, 8, 128, 128]]]
+    outputs: [[k, f32, [1, 8, 512, 128]]]
   - id: q
     op: input
-    outputs: [[q, f32, [1, 16, 128, 128]]]
+    outputs: [[q, f32, [1, 16, 512, 128]]]
   - id: v
     op: input
-    outputs: [[v, f32, [1, 8, 128, 128]]]
+    outputs: [[v, f32, [1, 8, 512, 128]]]
   - id: o
     op: torch.sdpa
     attrs: {is_causal: true, sliding_window: null, scale: null}
     inputs: [q, k, v]
-    outputs: [[o, f32, [1, 16, 128, 128]]]
+    outputs: [[o, f32, [1, 16, 512, 128]]]
 configs:
 - program: 0
   target:
     origins:
     - o
   realizations:
-  - name: k_sdpa_d0df3e.b595be4fca99
+  - name: k_sdpa_851635.6bd8fa3f8b38
     bindings: {}
     pins:
       FAST_MATH: false
@@ -51,5 +53,5 @@ configs:
       REDUCE: ''
       STAGE: ''
       RASTER: ''
-      WORK: t32x16
-    identity: 47d6ad49f5bfdd53ab7724125c38cea027b8869f35b1db441a5b2bde09c484ac
+      WORK: t32x8
+    identity: cfedc7a18de32df6b20100e62acbc7d44cdcf333ab58abd9bd5681c0afefe505

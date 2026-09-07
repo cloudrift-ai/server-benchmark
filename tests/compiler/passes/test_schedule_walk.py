@@ -194,7 +194,6 @@ def test_computed_fold_sites_are_keyed_schedule_sites(case, tile_sites, reduce_s
     assert sum(key == "REDUCE" or key.startswith("REDUCE@") for key in row) == reduce_sites
 
 
-@pytest.mark.xfail(strict=True, reason="fused value channel on tensor cores: not on this tree yet (PR #699)")
 def test_sdpa_fold_tree_offers_a_paired_mma_row(unpinned, monkeypatch) -> None:
     """The walk reaches a row where BOTH flash contractions ride the tensor core — the score's N
     tile feeding the value contraction's streamed K block through the fragment seam."""

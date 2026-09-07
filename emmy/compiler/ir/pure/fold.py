@@ -103,6 +103,11 @@ class ContractionView:
     materialized slab; a computed B answers ``False``. A stored on the same side is not a
     question: ``operands[0]`` is A by canonical form, k-last, which formation guarantees by
     orienting the pair."""
+    channel: int = 0
+    """Which carried state the products fold into — the position of this reading among the term's
+    results. ``0`` for a plain contraction, whose only state IS the accumulator; a twisted
+    carrier's expectation sits past the states its pivot and denominator carry, and the emission
+    that accumulates into it needs the position to name it."""
 
     @property
     def left(self) -> str | None:
@@ -457,56 +462,39 @@ class Fold:
 
     @cached_method
     def as_contraction(self) -> ContractionView | None:
-        """The :class:`ContractionView` of this term, or ``None`` when it is not bilinear.
+        """The :class:`ContractionView` of one CHANNEL of this term, or ``None`` when no channel is
+        bilinear.
 
         ALGEBRA names the pair, GEOMETRY names the axes. The two readings are not
         interchangeable: ``sum_k(a[m,k] * b[k,n])`` and ``sum_k(a[m,k] + b[k,n])`` have identical
         axes and identical free roles, so reading coordinates alone hands an addition to the
-        tensor-core tier. The semiring settles what the carrier is — one shared ⊗ per result
-        distributing over a commutative-monoid ⊕, the lift body nothing but those products — and
-        each product's ARGUMENTS say which operand edges it multiplies.
+        tensor-core tier. The semiring settles what the carrier is — a product distributing over a
+        commutative-monoid ⊕, the channel's CONE nothing but that product — and the product's
+        ARGUMENTS say which operand edges it multiplies.
 
-        The reduction is then what that pair SHARES, and each side's own free axis is the output
+        Per CHANNEL, because a carrier folds one state per channel and only some of them are
+        bilinear: attention's expectation is ``exp(s)·v`` beside a running maximum and a
+        denominator that are not products at all. Reading the whole lift instead would refuse the
+        pair for the company it keeps. The ⊕ is the BASE monoid's, componentwise by construction
+        (:attr:`base`) — the stable ``combine`` a twist derives is not, and asking it would refuse
+        every twisted carrier before the channel was looked at.
+
+        The reduction is then what the pair SHARES, and each side's own free axis is the output
         role it carries. Sharing is not exclusive to the reduction: a batch axis rides both
         operands and stays free (``Q[b,h,m,d] x K[b,h,n,d]`` shares ``{b,h,d}``, reduces ``d``),
         so the fold's axis must be AMONG the shared axes rather than all of them.
 
         Every product reads ``operands[0]`` — A by canonical form — which is what makes the fused
         multi-channel edge one contraction over one shared A rather than several. Memoized on the
-        term: it is immutable and every role, schedule and emission read
-        asks this.
+        term: it is immutable and every role, schedule and emission read asks this.
         """
-        if self.axis is None or self.combine is None or len(self.operands) < 2:
+        channels = self.bilinear_channels()
+        if not channels:
             return None
-        pluses = self.as_reduction().ops
-        if not pluses or len(set(pluses)) != 1:
-            return None
-        plus = pluses[0]
-        if not (plus.associative and plus.commutative and plus.has_identity) or self.init != (plus.identity,) * len(pluses):
-            return None
-        defs = self.lift.body.definitions
-        products = [defs.get(result) for result in self.lift.results]
-        if len(products) != len(pluses) or any(not isinstance(stmt, Assign) or len(stmt.args) != 2 for stmt in products):
-            return None
-        product = products[0].op
-        if any(stmt.op != product or not stmt.op.distributes_over(plus) for stmt in products):
-            return None
-        if {id(stmt) for stmt in products} != {id(stmt) for stmt in self.lift.body}:
-            return None
-        by_name = {param: edge for param, edge, _ in self.bindings}
+        channel, b_edge = channels[0]
+        product = self.lift.cone(self.lift.results[channel]).body[0].op
+        plus = self.base.components()[channel]
         a_edge = self.operands[0]
-        a_names = {param for param, edge, _ in self.bindings if edge is a_edge}
-        streamed = []
-        for stmt in products:
-            other = set(stmt.args) - a_names
-            if len(set(stmt.args) & a_names) != 1 or len(other) != 1:
-                return None  # a product that does not multiply A by exactly one other edge
-            edge = by_name.get(next(iter(other)))
-            if edge is None or edge is a_edge:
-                return None
-            streamed.append(edge)
-
-        b_edge = streamed[0]
         a_space, b_space = a_edge.free_axes, b_edge.free_axes
         if self.axis not in a_space & b_space:
             return None
@@ -525,7 +513,46 @@ class Fold:
             product=product,
             plus=plus,
             b_trans=b_trans,
+            channel=channel,
         )
+
+    @cached_method
+    def bilinear_channels(self) -> tuple[tuple[int, Fold], ...]:
+        """Every carried state whose per-element contribution is ONE product of ``operands[0]`` by
+        another operand edge, as ``(state index, that streamed edge)`` in carrier order.
+
+        The algebraic half of :meth:`as_contraction`, kept apart because the emission wants all of
+        them and the geometry only the first: a fused multi-channel edge folds one A against a
+        streamed B per accumulator, and a twisted carrier folds ONE such channel beside states
+        that are no product at all. The ⊕ is the BASE monoid's, componentwise by construction — a
+        twist's stable ``combine`` is not, and asking it would refuse every twisted carrier. Each
+        channel's ⊕ must be a commutative monoid its seed is the identity of, and the product must
+        distribute over it. Memoized on the term."""
+        if self.axis is None or self.base is None or len(self.operands) < 2:
+            return ()
+        pluses = self.base.components()
+        if pluses is None:
+            return ()
+        by_name = {param: edge for param, edge, _ in self.bindings}
+        a_edge = self.operands[0]
+        a_names = {param for param, edge, _ in self.bindings if edge is a_edge}
+        out: list[tuple[int, Fold]] = []
+        for index, result in enumerate(self.lift.results):
+            cone = self.lift.cone(result)
+            if len(cone.body) != 1 or not isinstance(stmt := cone.body[0], Assign) or len(stmt.args) != 2:
+                continue  # a state the carrier passes through, or one whose cone is more than a product
+            plus = pluses[index]
+            if not (plus.associative and plus.commutative and plus.has_identity) or self.init[index] != plus.identity:
+                continue
+            if not stmt.op.distributes_over(plus):
+                continue
+            other = set(stmt.args) - a_names
+            if len(set(stmt.args) & a_names) != 1 or len(other) != 1:
+                continue  # a product that does not multiply A by exactly one other edge
+            edge = by_name.get(next(iter(other)))
+            if edge is not None and edge is not a_edge:
+                out.append((index, edge))
+        return tuple(out)
 
     @cached_method
     def as_reduction(self) -> ReductionView | None:
